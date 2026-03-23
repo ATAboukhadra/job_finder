@@ -116,13 +116,13 @@ class JobMatcher:
         self.profile = profile
         self.weights = profile.get("weights", {
             "title": 0.20,
-            "semantic": 0.55,
+            "skills": 0.25,
+            "semantic": 0.30,
             "location": 0.10,
             "experience": 0.05,
         })
         # Ensure semantic weight exists for profiles with old-style weights
         if "semantic" not in self.weights:
-            # Redistribute from keywords + experience
             old_kw = self.weights.pop("keywords", 0.15)
             old_exp = self.weights.get("experience", 0.15)
             self.weights["semantic"] = old_kw + old_exp * 0.5
@@ -131,6 +131,7 @@ class JobMatcher:
         # Pre-tokenize profile components for token-based matching
         self._title_tokens = tokenize(" ".join(profile.get("titles", [])))
         self._locations = [loc.lower() for loc in profile.get("preferred_locations", [])]
+        self._skill_tokens = tf(tokenize(" ".join(profile.get("skills", []))))
 
         # Load life-story for experience matching
         life_story_text = load_life_story()
@@ -184,8 +185,8 @@ class JobMatcher:
         # Dot product of normalized vectors = cosine similarity
         sim = float(profile_emb @ job_emb)
         # Clamp and rescale: raw cosine similarity for text is usually 0.1-0.7
-        # Rescale to 0-1 range for better discrimination
-        sim = max(0.0, min(1.0, (sim - 0.1) / 0.5))
+        # Floor raised to 0.25 so only clearly relevant jobs score above 0
+        sim = max(0.0, min(1.0, (sim - 0.25) / 0.45))
         return sim
 
     def score(self, job: Job) -> tuple[float, dict]:
@@ -202,6 +203,11 @@ class JobMatcher:
         title_tf = tf(title_tokens)
         profile_title_tf = tf(self._title_tokens)
         title_score = cosine_sim(title_tf, profile_title_tf)
+
+        # 2. Skill keyword overlap — TF-IDF cosine against profile skills
+        skill_score = cosine_sim(job_tf, self._skill_tokens) if self._skill_tokens else 0.0
+        # Rescale: overlap is typically 0.0–0.15, map to 0–1
+        skill_score = min(1.0, skill_score / 0.10)
 
         # 3. Semantic similarity — deep embedding-based matching
         semantic_score = self._semantic_score(job)
@@ -225,11 +231,11 @@ class JobMatcher:
         # 6. Recency boost — newer jobs get up to 0.10 bonus
         recency_score = self._recency_score(job)
 
-        # Weighted sum (semantic-only, no skill token matching)
         w = self.weights
         total = (
             w.get("title", 0.20) * title_score
-            + w.get("semantic", 0.55) * semantic_score
+            + w.get("skills", 0.25) * skill_score
+            + w.get("semantic", 0.30) * semantic_score
             + w.get("location", 0.10) * location_score
             + w.get("experience", 0.05) * experience_score
             + 0.10 * recency_score
@@ -238,6 +244,7 @@ class JobMatcher:
 
         details = {
             "title_score": round(title_score, 3),
+            "skill_score": round(skill_score, 3),
             "semantic_score": round(semantic_score, 3),
             "location_score": round(location_score, 3),
             "experience_score": round(experience_score, 3),
