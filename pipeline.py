@@ -35,7 +35,7 @@ from notifier import send_digest_email, should_send_digest
 logger = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(__file__).parent / "profile.yaml"
-LOCATION_AGNOSTIC_BOARDS = {"remotive", "arbeitnow", "himalayas"}
+LOCATION_AGNOSTIC_BOARDS = {"remotive", "arbeitnow", "himalayas", "greenhouse", "lever", "linkedin_posts", "internet"}
 
 # Graceful shutdown flag
 _shutdown = False

@@ -14,6 +14,7 @@ from .jobspy_wrapper import JobSpyIndeedScraper, JobSpyGlassdoorScraper, JobSpyG
 from .greenhouse import GreenhouseScraper
 from .lever import LeverScraper
 from .linkedin_posts import LinkedInPostsScraper
+from .internet_search import InternetSearchScraper
 
 SCRAPERS = {
     # JobSpy-backed scrapers (handle JS rendering + bot detection)
@@ -24,6 +25,7 @@ SCRAPERS = {
     "greenhouse": GreenhouseScraper,
     "lever": LeverScraper,
     "linkedin_posts": LinkedInPostsScraper,
+    "internet": InternetSearchScraper,
     # Other boards
     "linkedin": LinkedInGuestScraper,
     "stepstone": StepstoneScraper,

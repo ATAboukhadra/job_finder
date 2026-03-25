@@ -134,6 +134,7 @@ search:
     - greenhouse     # Direct company career pages (Greenhouse ATS)
     - lever          # Direct company career pages (Lever ATS)
     - linkedin_posts # LinkedIn hiring posts via DuckDuckGo (no API key needed)
+    - internet       # Internet-wide hiring/job search via DuckDuckGo (all domains)
 
 # --- Target Company Career Pages ---
 # Greenhouse ATS: free public API at boards-api.greenhouse.io/v1/boards/{slug}/jobs
@@ -192,11 +193,14 @@ remote_preferred: true
 
 # --- Scoring Weights (must sum to ~0.90, recency adds +0.10 on top) ---
 weights:
+  skills: 0.20
   title: 0.20
   skills: 0.25        # Skill keyword overlap (hard filter against physics/unrelated jobs)
   semantic: 0.30      # Embedding similarity (broad relevance, reduced to avoid false positives)
   location: 0.10
-  experience: 0.05    # Life-story TF-IDF (lightweight supplement)
+  experience: 0.05    # life-story TF-IDF (lightweight supplement)
+  seniority: 0.15     # penalize jobs that require higher seniority than preferred
+  recency: 0.03       # reduced impact of posting date
 
 # --- Pipeline Automation ---
 pipeline:

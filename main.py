@@ -39,7 +39,7 @@ from storage import save_jobs, update_scores, get_top_jobs, get_db
 CONFIG_PATH = Path(__file__).parent / "profile.yaml"
 
 # Scrapers that ignore the location parameter — only need to run once per keyword
-LOCATION_AGNOSTIC_BOARDS = {"remotive", "arbeitnow", "himalayas", "greenhouse", "lever", "linkedin_posts"}
+LOCATION_AGNOSTIC_BOARDS = {"remotive", "arbeitnow", "himalayas", "greenhouse", "lever", "linkedin_posts", "internet"}
 
 ALL_BOARDS = list(SCRAPERS.keys())
 

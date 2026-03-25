@@ -21,6 +21,7 @@ class JobBoard(Enum):
     GREENHOUSE = "greenhouse"
     LEVER = "lever"
     LINKEDIN_POSTS = "linkedin_posts"
+    INTERNET = "internet"
 
 
 @dataclass

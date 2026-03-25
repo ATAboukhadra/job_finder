@@ -56,6 +56,15 @@ AI_KEYWORDS = {
     "medical imaging", "speech recognition", "recommender system",
 }
 
+SENIORITY_LEVELS = {
+    "intern": 0,
+    "junior": 1,
+    "mid": 2,
+    "senior": 3,
+    "staff": 4,
+    "principal": 5,
+}
+
 
 def is_ai_related(job: Job) -> bool:
     """Check if a job is AI/ML/CV related based on title and description."""
@@ -111,7 +120,9 @@ class JobMatcher:
           - keywords: list of important keyword strings
           - preferred_locations: list of location strings (optional)
           - remote_preferred: bool (optional)
-          - weights: dict with keys 'skills', 'title', 'semantic', 'location' (optional)
+                    - seniority_level: one of intern/junior/mid/senior/staff/principal (optional)
+                    - weights: dict with keys 'skills', 'title', 'semantic', 'location',
+                        'experience', 'seniority', 'recency' (optional)
         """
         self.profile = profile
         self.weights = profile.get("weights", {
@@ -120,6 +131,8 @@ class JobMatcher:
             "semantic": 0.30,
             "location": 0.10,
             "experience": 0.05,
+                        "seniority": 0.10,
+                        "recency": 0.04,
         })
         # Ensure semantic weight exists for profiles with old-style weights
         if "semantic" not in self.weights:
@@ -132,6 +145,9 @@ class JobMatcher:
         self._title_tokens = tokenize(" ".join(profile.get("titles", [])))
         self._locations = [loc.lower() for loc in profile.get("preferred_locations", [])]
         self._skill_tokens = tf(tokenize(" ".join(profile.get("skills", []))))
+        self._preferred_seniority = self._normalize_preferred_seniority(
+            profile.get("seniority_level", "mid")
+        )
 
         # Load life-story for experience matching
         life_story_text = load_life_story()
@@ -231,6 +247,9 @@ class JobMatcher:
         # 6. Recency boost — newer jobs get up to 0.10 bonus
         recency_score = self._recency_score(job)
 
+        # 7. Seniority fit — penalize jobs requiring more seniority than preferred
+        seniority_score = self._seniority_score(job)
+
         w = self.weights
         total = (
             w.get("title", 0.20) * title_score
@@ -238,7 +257,8 @@ class JobMatcher:
             + w.get("semantic", 0.30) * semantic_score
             + w.get("location", 0.10) * location_score
             + w.get("experience", 0.05) * experience_score
-            + 0.10 * recency_score
+            + w.get("seniority", 0.10) * seniority_score
+            + w.get("recency", 0.04) * recency_score
         )
         total = min(total, 1.0)
 
@@ -248,6 +268,7 @@ class JobMatcher:
             "semantic_score": round(semantic_score, 3),
             "location_score": round(location_score, 3),
             "experience_score": round(experience_score, 3),
+            "seniority_score": round(seniority_score, 3),
             "recency_score": round(recency_score, 3),
             "weighted_total": round(total, 3),
         }
@@ -267,6 +288,50 @@ class JobMatcher:
             return max(0.0, 1.0 - days_ago / 30.0)
         except (ValueError, TypeError):
             return 0.3
+
+    def _normalize_preferred_seniority(self, value: str) -> int:
+        text = (value or "mid").strip().lower()
+        if text in SENIORITY_LEVELS:
+            return SENIORITY_LEVELS[text]
+        if text in {"entry", "entry-level", "associate", "new grad", "graduate"}:
+            return SENIORITY_LEVELS["junior"]
+        if text in {"mid-level", "intermediate"}:
+            return SENIORITY_LEVELS["mid"]
+        if text in {"sr", "lead"}:
+            return SENIORITY_LEVELS["senior"]
+        return SENIORITY_LEVELS["mid"]
+
+    def _extract_job_seniority_level(self, job: Job) -> int | None:
+        text = f"{job.title} {job.description}".lower()
+        patterns = [
+            (SENIORITY_LEVELS["principal"], ["principal", "distinguished", "fellow"]),
+            (SENIORITY_LEVELS["staff"], ["staff", "architect"]),
+            (SENIORITY_LEVELS["senior"], [" senior ", " sr ", "lead", "manager", "head of"]),
+            (SENIORITY_LEVELS["mid"], ["mid-level", "mid level", "intermediate"]),
+            (SENIORITY_LEVELS["junior"], ["junior", "associate", "entry-level", "entry level", "graduate", "new grad"]),
+            (SENIORITY_LEVELS["intern"], ["intern", "internship", "trainee"]),
+        ]
+
+        padded = f" {text} "
+        for level, tokens in patterns:
+            for token in tokens:
+                if token in padded:
+                    return level
+        return None
+
+    def _seniority_score(self, job: Job) -> float:
+        level = self._extract_job_seniority_level(job)
+        if level is None:
+            return 0.5
+
+        delta = level - self._preferred_seniority
+        if delta <= -1:
+            return 0.9
+        if delta == 0:
+            return 1.0
+        if delta == 1:
+            return 0.35
+        return 0.0
 
     def rank(self, jobs: list[Job], min_score: float = 0.0) -> list[Job]:
         """Score, filter non-AI jobs, and return sorted by score (descending), then date."""

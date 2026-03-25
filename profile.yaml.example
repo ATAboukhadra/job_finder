@@ -1,0 +1,112 @@
+# =============================================================================
+# AI Apply — User Profile Template
+# =============================================================================
+# Copy this file to profile.yaml and fill in your details.
+# The system uses this to match jobs, generate your CV, and write cover letters.
+
+# --- Your Technical Skills ---
+# List skills that appear in job descriptions you want (programming languages,
+# frameworks, tools, methodologies). Be specific — these are used for matching.
+skills:
+  - python
+  - pytorch
+  - deep learning
+  - computer vision
+  # Add more: tensorflow, kubernetes, react, sql, etc.
+
+# --- Desired Job Titles ---
+# What job titles are you targeting? List variations — the system checks if
+# the job title overlaps with this list.
+titles:
+  - machine learning engineer
+  - data scientist
+  - software engineer
+  # Add more relevant titles
+
+# --- Domain Keywords ---
+# Keywords that boost a job's score when they appear in the description.
+# Think: sub-fields, techniques, or product areas you care about.
+keywords:
+  - neural network
+  - computer vision
+  - real-time
+  # Add more: NLP, robotics, recommendation systems, etc.
+
+# --- Search Configuration ---
+search:
+  # What to search for on job boards
+  queries:
+    - "machine learning engineer"
+    - "deep learning engineer"
+    - "computer vision engineer"
+    # Add more search terms that match your target roles
+
+  # Where to search — one search per location × keyword combination
+  locations:
+    - "Germany"
+    - "United Kingdom"
+    - "Remote"
+    # Add more: Netherlands, France, USA, etc.
+
+  remote: true           # Include remote jobs
+  job_type: ""           # "full-time", "part-time", "contract", or "" for all
+  max_age_days: 14       # Skip jobs older than this many days
+
+  # Which job boards to scrape (remove boards you don't need)
+  boards:
+    - indeed        # Major global board
+    - glassdoor     # With company reviews
+    - google        # Google Jobs aggregator
+    - linkedin      # LinkedIn listings
+    - remotive      # Remote-focused
+    - arbeitnow     # EU + remote, no API key needed
+    - himalayas     # Remote tech jobs, no API key needed
+    - themuse       # Curated tech jobs, no API key needed
+    - adzuna        # Needs ADZUNA_APP_ID + ADZUNA_APP_KEY in .env
+    - jsearch       # Google Jobs via RapidAPI — needs RAPIDAPI_KEY in .env
+    - greenhouse    # Direct company ATS pages (see companies section below)
+    - lever         # Direct company ATS pages (see companies section below)
+
+# --- Target Company Career Pages (optional) ---
+# Add companies whose Greenhouse or Lever ATS pages to scrape directly.
+# Find a slug: go to a company's careers page — if URL contains
+# boards.greenhouse.io/{slug} or jobs.lever.co/{slug}, that's the slug.
+companies:
+  greenhouse:
+    # - { name: "OpenAI",     slug: "openai" }
+    # - { name: "DeepMind",   slug: "deepmind" }
+  lever:
+    # - { name: "Cohere",     slug: "cohere" }
+
+# --- Location Preferences ---
+# Jobs in these locations get a scoring boost. Be specific — city names work.
+preferred_locations:
+  - Germany
+  - United Kingdom
+  - Remote
+  # Add more: Amsterdam, Zurich, London, etc.
+
+remote_preferred: true
+
+# --- Scoring Weights ---
+# These control how the match score is calculated.
+# title + skills + semantic + location + experience should sum to ~0.90
+# (recency adds up to +0.10 on top automatically).
+weights:
+  title: 0.20       # Job title matches your desired titles
+  skills: 0.25      # Skill keyword overlap (most reliable filter)
+  semantic: 0.30    # Embedding similarity (broad relevance)
+  location: 0.10    # Location preference match
+  experience: 0.05  # Life-story text similarity
+
+# --- Pipeline Automation ---
+pipeline:
+  auto_apply_threshold: 0.50   # Min score to trigger CV/cover letter generation
+  max_applications_per_run: 10  # Max automated applications per pipeline run
+  email_recipient: "you@example.com"   # Where to send job digest emails
+  email_digest_interval_days: 2        # How often to send digest
+  cv_dir: "~/CV"               # Where your LaTeX CV files live
+  ollama_model: "qwen3.5:9b"   # Set by setup_ollama.sh based on your hardware
+  # Gmail credentials go in .env:
+  #   GMAIL_USER=you@gmail.com
+  #   GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx

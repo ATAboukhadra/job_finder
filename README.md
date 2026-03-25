@@ -1,12 +1,12 @@
 # AI Apply — Automated Job Application Pipeline
 
-Fully automated job application system: scrapes listings from 10 job boards, scores them against your profile using semantic embeddings, and for top matches automatically generates a tailored CV, cover letter, form answers, and digest email — all driven by a local LLM (Qwen via Ollama).
+Fully automated job application system: scrapes listings from multiple job sources, scores them against your profile using semantic embeddings, and for top matches automatically generates a tailored CV, cover letter, form answers, and digest email — all driven by a local LLM (Qwen via Ollama).
 
 ---
 
 ## Features
 
-- **Multi-source scraping** — pulls from 10 job boards simultaneously
+- **Multi-source scraping** — pulls from job boards + internet-wide hiring search simultaneously
 - **Semantic matching** — sentence-transformer embeddings rank jobs against your full life story + profile
 - **AI relevance filter** — automatically filters for ML/AI/CV-related roles
 - **SQLite storage** — deduplicates and persists all scraped jobs and application state
@@ -35,6 +35,7 @@ Fully automated job application system: scrapes listings from 10 job boards, sco
 | **Indeed** | Web scraper | No |
 | **Glassdoor** | Web scraper | No |
 | **StepStone** | Web scraper | No |
+| **Internet Search** | DuckDuckGo web search (all domains) | No |
 
 ---
 
@@ -253,7 +254,8 @@ job_finder/
 │   ├── linkedin_guest.py# LinkedIn guest scraper (no login)
 │   ├── indeed.py        # Indeed scraper
 │   ├── glassdoor.py     # Glassdoor scraper
-│   └── stepstone.py     # StepStone scraper
+│   ├── stepstone.py     # StepStone scraper
+│   └── internet_search.py # Internet-wide hiring search scraper
 └── templates/           # Jinja2 templates for web UI
     ├── base.html
     ├── dashboard.html
@@ -278,10 +280,14 @@ job_finder/
 | `search.remote` | Include remote positions |
 | `search.max_age_days` | Skip jobs older than N days |
 | `preferred_locations` | Locations that boost score |
+| `seniority_level` | Preferred level (`intern`, `junior`, `mid`, `senior`, `staff`, `principal`) |
 | `weights.skills` | Weight for skill keyword overlap |
 | `weights.title` | Weight for title match |
 | `weights.semantic` | Weight for embedding similarity (recommended: 0.55+) |
 | `weights.location` | Weight for location preference |
+| `weights.experience` | Weight for life-story overlap |
+| `weights.seniority` | Weight for seniority fit (penalizes jobs above preferred level) |
+| `weights.recency` | Weight for posting recency (date-posted impact) |
 | `pipeline.ollama_model` | Ollama model to use (default: `qwen3.5:9b`) |
 | `pipeline.min_score` | Minimum score to trigger automation |
 | `pipeline.max_applications_per_run` | Cap on applications per pipeline run |
