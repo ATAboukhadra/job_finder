@@ -179,26 +179,38 @@ class JobSpyGoogleScraper:
 
 
 class JobSpyLinkedInScraper:
-    """LinkedIn via python-jobspy (handles anti-bot + returns full descriptions)."""
+    """LinkedIn via python-jobspy with Apify fallback.
+
+    Primary: python-jobspy (free, no API key).
+    Fallback: Apify LinkedIn actor (requires APIFY_API_TOKEN).
+    """
+
+    def __init__(self):
+        from scrapers.apify_linkedin import ApifyLinkedInScraper
+        self._apify = ApifyLinkedInScraper()
 
     def scrape(self, query: SearchQuery, max_results: int = 50) -> list[Job]:
-        if not JOBSPY_AVAILABLE:
-            logger.warning("Skipping LinkedIn JobSpy (python-jobspy not installed)")
-            return []
-        try:
-            df = _jobspy_scrape(
-                site_name=["linkedin"],
-                search_term=query.keywords,
-                location=query.location or "",
-                results_wanted=max_results,
-                hours_old=query.max_age_days * 24,
-                is_remote=bool(query.remote),
-                verbose=0,
-            )
-            return _df_to_jobs(df, JobBoard.LINKEDIN)
-        except Exception as e:
-            logger.error(f"JobSpy LinkedIn error: {e}")
-            return []
+        if JOBSPY_AVAILABLE:
+            try:
+                df = _jobspy_scrape(
+                    site_name=["linkedin"],
+                    search_term=query.keywords,
+                    location=query.location or "",
+                    results_wanted=max_results,
+                    hours_old=query.max_age_days * 24,
+                    is_remote=bool(query.remote),
+                    verbose=0,
+                )
+                jobs = _df_to_jobs(df, JobBoard.LINKEDIN)
+                if jobs:
+                    return jobs
+                logger.info("JobSpy LinkedIn returned 0 results — trying Apify fallback")
+            except Exception as e:
+                logger.warning(f"JobSpy LinkedIn error: {e} — trying Apify fallback")
+        else:
+            logger.warning("python-jobspy not installed — trying Apify fallback")
+
+        return self._apify.scrape(query, max_results)
 
     def get_job_details(self, job: Job) -> Job:
-        return job  # jobspy returns full descriptions
+        return job  # both sources return full descriptions

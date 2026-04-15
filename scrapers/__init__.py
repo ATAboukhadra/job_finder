@@ -18,6 +18,7 @@ from .internet_search import InternetSearchScraper
 from .bayt import BaytScraper
 from .gulftalent import GulfTalentScraper
 from .wuzzuf import WuzzufScraper
+from .apify_linkedin import ApifyLinkedInScraper
 
 SCRAPERS = {
     # JobSpy-backed scrapers (handle JS rendering + bot detection)
