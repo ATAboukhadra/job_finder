@@ -103,7 +103,7 @@ class JobSpyIndeedScraper:
                 results_wanted=max_results,
                 hours_old=query.max_age_days * 24,
                 country_indeed=_country(query.location or ""),
-                is_remote=True if query.remote else None,
+                is_remote=bool(query.remote),
                 verbose=0,
             )
             return _df_to_jobs(df, JobBoard.INDEED)
