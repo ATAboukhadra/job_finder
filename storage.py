@@ -41,10 +41,27 @@ def get_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
             cv_pdf_path TEXT,
             cover_letter_pdf_path TEXT,
             form_answers_json TEXT DEFAULT '{}',
+            recruiter_email TEXT DEFAULT '',
+            email_subject TEXT DEFAULT '',
+            email_body TEXT DEFAULT '',
+            approved_at TEXT DEFAULT '',
+            sent_at TEXT DEFAULT '',
             created_at TEXT,
             updated_at TEXT
         )
     """)
+    # Lightweight schema migration for existing DBs
+    _ensure_columns(
+        conn,
+        "applications",
+        {
+            "recruiter_email": "TEXT DEFAULT ''",
+            "email_subject": "TEXT DEFAULT ''",
+            "email_body": "TEXT DEFAULT ''",
+            "approved_at": "TEXT DEFAULT ''",
+            "sent_at": "TEXT DEFAULT ''",
+        },
+    )
     conn.execute("""
         CREATE TABLE IF NOT EXISTS pipeline_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,6 +86,18 @@ def get_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
     """)
     conn.commit()
     return conn
+
+
+def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    """Add columns if missing (SQLite ALTER TABLE ADD COLUMN)."""
+    try:
+        existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except Exception:
+        return
+    for name, ddl in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+    conn.commit()
 
 
 # --- Application CRUD ---

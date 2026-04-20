@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from llm import generate_latex, generate_structured, check_ollama_available
+from user_profile import load_person, split_name
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,464 @@ SYMLINK_FILES = [
     "referee.tex", "referee-full.tex",
     "own-bib.bib", "photo.png", "photo.jpg", "settings.sty",
 ]
+
+# Optional few-shot examples for specific domains. Not required for web/dev CVs.
+# Keep empty unless you add example files and mappings.
+EXAMPLE_EMPLOYMENT: Dict[str, Path] = {}
+EXAMPLE_SKILLS: Dict[str, Path] = {}
+EXAMPLE_PROJECTS: Dict[str, Path] = {}
+
+def ensure_miktex_auto_install() -> None:
+    """Best-effort: disable MiKTeX package install popups.
+
+    MiKTeX can prompt with GUI dialogs for missing packages, which will stall
+    automated compilation and cause timeouts. We try to configure MiKTeX to
+    auto-install packages without asking.
+    """
+    try:
+        # `initexmf` is the MiKTeX config tool. If it isn't present, ignore.
+        subprocess.run(
+            ["initexmf", "--set-config-value=[MPM]AutoInstall=1"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        subprocess.run(
+            ["initexmf", "--set-config-value=[MPM]AskInstall=0"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except Exception:
+        pass
+
+def _is_valid_pdf(path: Path) -> bool:
+    """Cheap PDF integrity check: header + EOF marker + minimum size."""
+    try:
+        if not path.exists() or path.stat().st_size < 10_000:
+            return False
+        data = path.read_bytes()
+        if not data.startswith(b"%PDF"):
+            return False
+        return b"%%EOF" in data[-2048:]
+    except Exception:
+        return False
+
+
+def _latex_escape(text: str) -> str:
+    if text is None:
+        return ""
+    return (
+        str(text)
+        .replace("\\", r"\textbackslash{}")
+        .replace("&", r"\&")
+        .replace("%", r"\%")
+        .replace("$", r"\$")
+        .replace("#", r"\#")
+        .replace("_", r"\_")
+        .replace("{", r"\{")
+        .replace("}", r"\}")
+        .replace("~", r"\textasciitilde{}")
+        .replace("^", r"\textasciicircum{}")
+    )
+
+
+def personalize_cv_header(app_dir: Path) -> None:
+    """Replace YOUR_* placeholders in app_dir/cv-llt.tex using life-story/profile."""
+    cv_tex = app_dir / "cv-llt.tex"
+    if not cv_tex.exists():
+        return
+
+    person = load_person()
+    first, last = split_name(person.full_name or "")
+
+    linkedin_handle = (person.linkedin or "").strip()
+    if linkedin_handle.startswith("http"):
+        linkedin_handle = linkedin_handle.rstrip("/").split("/")[-1]
+
+    github_handle = (person.github or "").strip()
+    if github_handle.startswith("http"):
+        github_handle = github_handle.rstrip("/").split("/")[-1]
+
+    replacements = {
+        "YOUR_FIRST_NAME": _latex_escape(first or person.full_name),
+        "YOUR_LAST_NAME": _latex_escape(last),
+        "YOUR_EMAIL": _latex_escape(person.email),
+        "YOUR_LINKEDIN_HANDLE": _latex_escape(linkedin_handle),
+        "YOUR_GITHUB": _latex_escape(github_handle),
+        "YOUR_LASTNAME": _latex_escape(last),
+        "YOUR_FIRSTNAME": _latex_escape(first),
+        "YOUR_MIDDLENAME_OR_INITIAL": "",
+    }
+
+    content = cv_tex.read_text(encoding="utf-8", errors="replace")
+    for k, v in replacements.items():
+        content = content.replace(k, v)
+
+    # If the user didn't provide a photo in this application folder, hide the photo block.
+    has_photo = (app_dir / "photo.png").exists() or (app_dir / "photo.jpg").exists()
+    if not has_photo:
+        content = content.replace(r"\includecomment{fullonly}", r"\excludecomment{fullonly}")
+
+    cv_tex.write_text(content, encoding="utf-8")
+
+
+def _looks_like_placeholder(tex: str) -> bool:
+    markers = [
+        "Your Most Recent Job Title",
+        "Ph.D. in YOUR FIELD",
+        "YOUR FIELD",
+        "Project Name",
+        "YOUR_GITHUB/PROJECT",
+        "Your domain-specific technical skills here",
+    ]
+    t = tex or ""
+    if any(m in t for m in markers):
+        return True
+    # Also treat known-bad curve entry formatting as "needs regen"
+    # (LLM sometimes emits \entry*[DATE]{...} which breaks curve template expectations).
+    if re.search(r"\\entry\*\[[^\]]*\]\s*\{", t):
+        return True
+    return False
+
+
+def _generate_base_rubric(*, rubric_name: str, life_story: str, model: str) -> str:
+    system = (
+        "You generate LaTeX rubric content for the curve CV template.\n"
+        "Return LaTeX only (no markdown, no explanations).\n"
+        "Must compile inside a file like employment.tex/education.tex/skills.tex/projects.tex.\n"
+        "Use this exact structure:\n"
+        "\\begin{rubric}{<Title>} ... \\end{rubric}\n"
+        "Use \\entry*[DATE] ... for items.\n"
+        "Do NOT invent degrees, companies, dates, or achievements. Only use what is explicitly in LIFE STORY.\n"
+        "Escape LaTeX special characters when needed (e.g., %, &, _).\n"
+    )
+
+    prompt = (
+        f"LIFE STORY:\n{life_story}\n\n"
+        f"Task: Generate the '{rubric_name}' rubric file content.\n"
+        "If the life story does not contain enough info for a section, keep it minimal but valid.\n"
+    )
+    return generate_latex(prompt=prompt, system=system, model=model, temperature=0.2, max_tokens=1800, timeout=600)
+
+
+def _extract_section(text: str, header: str) -> str:
+    # Extract markdown section content between "## Header" and next "## ".
+    pattern = rf"^##\s+{re.escape(header)}\s*$"
+    lines = text.splitlines()
+    start = None
+    for i, ln in enumerate(lines):
+        if re.match(pattern, ln.strip(), flags=re.IGNORECASE):
+            start = i + 1
+            break
+    if start is None:
+        return ""
+    out: list[str] = []
+    for ln in lines[start:]:
+        if ln.strip().startswith("## "):
+            break
+        out.append(ln)
+    return "\n".join(out).strip()
+
+
+def _md_bullets(block: str) -> list[str]:
+    bullets: list[str] = []
+    for ln in (block or "").splitlines():
+        s = ln.strip()
+        if s.startswith("- "):
+            bullets.append(s[2:].strip())
+    return bullets
+
+
+def _parse_work_experience(text: str) -> list[dict]:
+    # Expect entries like:
+    # ### Role — Org, Location
+    # **July 2025 – August 2025**
+    # paragraph(s)
+    # - bullets...
+    # **Technologies:** ...
+    block = _extract_section(text, "Work Experience")
+    if not block:
+        return []
+    lines = block.splitlines()
+    entries: list[dict] = []
+    i = 0
+    while i < len(lines):
+        ln = lines[i].strip()
+        if ln.startswith("### "):
+            title = ln[4:].strip()
+            i += 1
+            date = ""
+            if i < len(lines) and lines[i].strip().startswith("**") and lines[i].strip().endswith("**"):
+                date = lines[i].strip().strip("*").strip()
+                i += 1
+            body_lines: list[str] = []
+            while i < len(lines) and not lines[i].strip().startswith("### "):
+                body_lines.append(lines[i])
+                i += 1
+            body = "\n".join(body_lines).strip()
+            tech = ""
+            m = re.search(r"\*\*Technologies:\*\*\s*(.+)", body)
+            if m:
+                tech = m.group(1).strip()
+            bullets = _md_bullets(body)
+            # Remove the technologies line from bullets if present
+            bullets = [b for b in bullets if not b.lower().startswith("technologies:")]
+            # First non-empty paragraph sentence as context (optional)
+            paras = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
+            context = ""
+            if paras:
+                context = re.sub(r"\*\*Technologies:\*\*.*", "", paras[0]).strip()
+            entries.append({"title": title, "date": date, "context": context, "bullets": bullets, "tech": tech})
+        else:
+            i += 1
+    return entries
+
+
+def _parse_education(text: str) -> list[dict]:
+    block = _extract_section(text, "Education")
+    if not block:
+        return []
+    lines = block.splitlines()
+    entries: list[dict] = []
+    i = 0
+    while i < len(lines):
+        ln = lines[i].strip()
+        if ln.startswith("### "):
+            title = ln[4:].strip()
+            i += 1
+            date = ""
+            if i < len(lines) and lines[i].strip().startswith("**") and lines[i].strip().endswith("**"):
+                date = lines[i].strip().strip("*").strip()
+                i += 1
+            body_lines: list[str] = []
+            while i < len(lines) and not lines[i].strip().startswith("### "):
+                body_lines.append(lines[i])
+                i += 1
+            body = "\n".join(body_lines).strip()
+            bullets = _md_bullets(body)
+            entries.append({"title": title, "date": date, "bullets": bullets})
+        else:
+            i += 1
+    return entries
+
+
+def _parse_projects(text: str) -> list[dict]:
+    block = _extract_section(text, "Projects")
+    if not block:
+        return []
+    lines = block.splitlines()
+    entries: list[dict] = []
+    i = 0
+    while i < len(lines):
+        ln = lines[i].strip()
+        if ln.startswith("### "):
+            name = ln[4:].strip()
+            i += 1
+            body_lines: list[str] = []
+            while i < len(lines) and not lines[i].strip().startswith("### "):
+                body_lines.append(lines[i])
+                i += 1
+            body = "\n".join(body_lines).strip()
+            bullets = _md_bullets(body)
+            code = ""
+            tech = ""
+            what = ""
+            for b in bullets:
+                if b.lower().startswith("code:"):
+                    code = b.split(":", 1)[1].strip()
+                elif b.lower().startswith("technologies:"):
+                    tech = b.split(":", 1)[1].strip()
+                elif b.lower().startswith("what it does:"):
+                    what = b.split(":", 1)[1].strip()
+            # Key achievements line (optional)
+            achievements = ""
+            for b in bullets:
+                if b.lower().startswith("key achievements:"):
+                    achievements = b.split(":", 1)[1].strip()
+            entries.append({"name": name, "what": what, "achievements": achievements, "tech": tech, "code": code})
+        else:
+            i += 1
+    return entries
+
+
+def _parse_skills(text: str) -> list[tuple[str, str]]:
+    block = _extract_section(text, "Skills")
+    if not block:
+        return []
+    lines = block.splitlines()
+    out: list[tuple[str, str]] = []
+    current = ""
+    items: list[str] = []
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("### "):
+            if current and items:
+                out.append((current, ", ".join(items)))
+            current = s[4:].strip()
+            items = []
+        elif s.startswith("- "):
+            # skill line sometimes has "X — note"
+            items.append(s[2:].split("—", 1)[0].strip())
+    if current and items:
+        out.append((current, ", ".join(items)))
+    return out
+
+
+def _entry(date: str, body_lines: list[str]) -> str:
+    # Curve rubric entry format expected by template:
+    # \entry*[DATE]%
+    #     line
+    #     \par line
+    date = (date or "").replace("–", "--")
+    out = [rf"\entry*[{_latex_escape(date)}]%"]
+    for idx, ln in enumerate(body_lines):
+        if idx == 0:
+            out.append(f"    {ln}")
+        else:
+            out.append(f"    \\par {ln}")
+    return "\n".join(out)
+
+
+def render_employment_from_life_story(text: str) -> str:
+    entries = _parse_work_experience(text)
+    lines = [r"\begin{rubric}{Experience}", ""]
+    if not entries:
+        lines += [r"\end{rubric}", ""]
+        return "\n".join(lines).strip()
+    for e in entries:
+        title = e["title"]
+        # Split "Role — Org, ..." if present
+        role = title
+        org = ""
+        if "—" in title:
+            role, org = [p.strip() for p in title.split("—", 1)]
+        head = rf"\textbf{{{_latex_escape(role)},}} {_latex_escape(org)}.".strip()
+        body: list[str] = [head]
+        if e.get("context"):
+            body.append(_latex_escape(e["context"]))
+        for b in e.get("bullets", [])[:6]:
+            body.append(rf"- {_latex_escape(b)}")
+        if e.get("tech"):
+            body.append(rf"Technologies: {_latex_escape(e['tech'])}.")
+        lines.append(_entry(e.get("date", ""), body))
+        lines.append("")
+    lines.append(r"\end{rubric}")
+    return "\n".join(lines).strip() + "\n"
+
+
+def render_education_from_life_story(text: str) -> str:
+    entries = _parse_education(text)
+    lines = [r"\begin{rubric}{Education}", ""]
+    for e in entries:
+        title = _latex_escape(e["title"])
+        body = [rf"\textbf{{{title}}}"]
+        for b in e.get("bullets", [])[:6]:
+            body.append(rf"- {_latex_escape(b)}")
+        lines.append(_entry(e.get("date", ""), body))
+        lines.append("")
+    lines.append(r"\end{rubric}")
+    return "\n".join(lines).strip() + "\n"
+
+
+def render_skills_from_life_story(text: str) -> str:
+    cats = _parse_skills(text)
+    lines = [r"\begin{rubric}{Skills}", ""]
+    for cat, items in cats:
+        lines.append(rf"\entry*[{_latex_escape(cat)}]%")
+        lines.append(f"    {_latex_escape(items)}.")
+        lines.append("")
+    lines.append(r"\end{rubric}")
+    return "\n".join(lines).strip() + "\n"
+
+
+def render_projects_from_life_story(text: str) -> str:
+    projs = _parse_projects(text)
+    lines = [r"\begin{rubric}{Projects}", ""]
+    for p in projs:
+        body: list[str] = [rf"\textbf{{{_latex_escape(p['name'])}}} — {_latex_escape(p.get('what') or p.get('achievements') or '')}"]
+        if p.get("tech"):
+            body.append(rf"Technologies: {_latex_escape(p['tech'])}.")
+        if p.get("code"):
+            body.append(rf"\href{{{p['code']}}}{{\faGithub}}")
+        lines.append(_entry("2025", body))
+        lines.append("")
+    lines.append(r"\end{rubric}")
+    return "\n".join(lines).strip() + "\n"
+
+
+def ensure_base_cv_content(cv_dir: Path, *, model: str = "qwen2.5:3b") -> None:
+    """If cv_dir contains template placeholders, regenerate from life-story.md."""
+    life_story_path = resolve_life_story_path(cv_dir)
+    if not life_story_path.exists():
+        return
+    life_story = life_story_path.read_text(encoding="utf-8", errors="replace")
+
+    renderers = {
+        "employment.tex": render_employment_from_life_story,
+        "education.tex": render_education_from_life_story,
+        "skills.tex": render_skills_from_life_story,
+        "projects.tex": render_projects_from_life_story,
+    }
+
+    for filename, renderer in renderers.items():
+        path = cv_dir / filename
+        if not path.exists():
+            continue
+        current = path.read_text(encoding="utf-8", errors="replace")
+        if not _looks_like_placeholder(current):
+            continue
+        try:
+            path.write_text(renderer(life_story), encoding="utf-8")
+            logger.info("Regenerated base %s from life-story.md", filename)
+        except Exception as e:
+            logger.warning("Failed to regenerate base %s: %s", filename, e)
+
+def ensure_cv_scaffold(cv_dir: Path) -> None:
+    """Ensure cv_dir contains the minimum required template files.
+
+    The repo ships templates in ./cv_templates, but the working cv/ folder is user-owned
+    (often gitignored). If cv/ is missing, copy the templates once.
+    """
+    templates_dir = _PROJECT_ROOT / "cv_templates"
+    if not templates_dir.exists():
+        return
+
+    cv_dir.mkdir(parents=True, exist_ok=True)
+
+    mapping = {
+        "cv-llt-template.tex": "cv-llt.tex",
+        "employment-template.tex": "employment.tex",
+        "skills-template.tex": "skills.tex",
+        "projects-template.tex": "projects.tex",
+        "education-template.tex": "education.tex",
+        "publications-template.tex": "publications.tex",
+        "own-bib.bib": "own-bib.bib",
+        "settings.sty": "settings.sty",
+    }
+
+    for src_name, dest_name in mapping.items():
+        src = templates_dir / src_name
+        dest = cv_dir / dest_name
+        if src.exists() and not dest.exists():
+            shutil.copy2(str(src), str(dest))
+
+    # Ensure optional referenced files exist so compilation doesn't fail.
+    for optional in ["publications.tex", "own-bib.bib"]:
+        dest = cv_dir / optional
+        if not dest.exists():
+            try:
+                dest.write_text("", encoding="utf-8")
+            except Exception:
+                pass
+
+    # Life story template (only if user doesn't already have one in project root)
+    project_life = _PROJECT_ROOT / "life-story.md"
+    if not project_life.exists():
+        src = templates_dir / "life_story_template.md"
+        dest = cv_dir / "life-story.md"
+        if src.exists() and not dest.exists():
+            shutil.copy2(str(src), str(dest))
 
 
 def resolve_cv_dir(profile: Optional[dict] = None) -> Path:
@@ -102,16 +561,19 @@ Return JSON with these fields:
 - "focus_areas": list of 3-5 main focus areas of the role
 - "company_mission": one sentence about what the company does (if inferrable)
 """
-    result = generate_structured(prompt, model=model)
-    if not result:
-        result = {
-            "domain": "general_ml",
-            "key_technologies": [],
-            "keywords": [],
-            "focus_areas": [],
-            "company_mission": "",
-        }
-    return result
+    raw = generate_structured(prompt, model=model)
+    # Some models may return a JSON list; normalize to dict.
+    if isinstance(raw, list) and raw:
+        raw = raw[0] if isinstance(raw[0], dict) else {}
+    if not isinstance(raw, dict) or not raw:
+        raw = {}
+    return {
+        "domain": raw.get("domain", "general_ml"),
+        "key_technologies": raw.get("key_technologies", []) or [],
+        "keywords": raw.get("keywords", []) or [],
+        "focus_areas": raw.get("focus_areas", []) or [],
+        "company_mission": raw.get("company_mission", "") or "",
+    }
 
 
 def generate_employment_tex(
@@ -321,7 +783,13 @@ def create_application_dir(slug: str, cv_dir: Path) -> Path:
             try:
                 link.symlink_to(target)
             except OSError as e:
-                logger.warning("Failed to create symlink %s: %s", f, e)
+                # Windows often blocks symlinks without admin/developer-mode.
+                # Fall back to copying to keep the build working.
+                logger.warning("Failed to create symlink %s: %s (copying instead)", f, e)
+                try:
+                    shutil.copy2(str(target), str(link))
+                except Exception as copy_err:
+                    logger.warning("Failed to copy %s: %s", f, copy_err)
 
     return dest
 
@@ -333,32 +801,81 @@ def compile_latex(directory: Path) -> Optional[str]:
         logger.error("No cv-llt.tex found in %s", directory)
         return None
 
+    def _cleanup():
+        for ext in [".aux", ".bbl", ".bcf", ".blg", ".fdb_latexmk", ".fls",
+                    ".log", ".out", ".run.xml", ".synctex.gz", ".toc"]:
+            aux = directory / ("cv-llt" + ext)
+            if aux.exists():
+                try:
+                    aux.unlink()
+                except Exception:
+                    pass
+
+    pdf_path = directory / "cv-llt.pdf"
+
+    ensure_miktex_auto_install()
+
+    # Prefer latexmk if available (fast, handles refs), but on Windows MiKTeX it may require Perl.
     try:
         result = subprocess.run(
             ["latexmk", "-pdf", "-interaction=nonstopmode", "cv-llt.tex"],
             cwd=str(directory),
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=180,
         )
-
-        pdf_path = directory / "cv-llt.pdf"
-        if pdf_path.exists():
-            # Clean up auxiliary files
-            for ext in [".aux", ".bbl", ".bcf", ".blg", ".fdb_latexmk", ".fls",
-                        ".log", ".out", ".run.xml", ".synctex.gz", ".toc"]:
-                aux = directory / ("cv-llt" + ext)
-                if aux.exists():
-                    aux.unlink()
+        if _is_valid_pdf(pdf_path):
+            _cleanup()
             return str(pdf_path)
-        else:
-            logger.error("PDF not generated. LaTeX output:\n%s", result.stderr[-2000:])
-            return None
-    except subprocess.TimeoutExpired:
-        logger.error("LaTeX compilation timed out")
+        stderr = (result.stderr or "")[-2000:]
+        if "script engine 'perl'" not in stderr.lower():
+            logger.error("PDF not generated. LaTeX output:\n%s", stderr)
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        logger.warning("latexmk unavailable/failed (%s). Falling back to pdflatex.", e)
+
+    # Fallback: run pdflatex directly (no Perl).
+    # Try MiKTeX common path first; else rely on PATH.
+    miktex_bin = Path(r"C:\Users\Admin\AppData\Local\Programs\MiKTeX\miktex\bin\x64")
+    pdflatex = miktex_bin / "pdflatex.exe"
+    pdflatex_cmd = str(pdflatex) if pdflatex.exists() else "pdflatex"
+    try:
+        # Run twice for references.
+        last = None
+        for _ in range(2):
+            last = subprocess.run(
+                [pdflatex_cmd, "-interaction=nonstopmode", "cv-llt.tex"],
+                cwd=str(directory),
+                capture_output=True,
+                text=True,
+                timeout=900,
+            )
+        if _is_valid_pdf(pdf_path):
+            _cleanup()
+            return str(pdf_path)
+        # Remove corrupt/partial PDF if it exists
+        if pdf_path.exists() and not _is_valid_pdf(pdf_path):
+            try:
+                pdf_path.unlink()
+            except Exception:
+                pass
+        if last is not None:
+            try:
+                (directory / "cv-compile.stdout.txt").write_text(last.stdout or "", encoding="utf-8", errors="replace")
+                (directory / "cv-compile.stderr.txt").write_text(last.stderr or "", encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+            tail = ((last.stderr or last.stdout or "")[-2500:]).strip()
+            if tail:
+                logger.error("pdflatex output (tail):\n%s", tail)
+        logger.error("PDF not generated via pdflatex either.")
         return None
-    except FileNotFoundError:
-        logger.error("latexmk not found. Install LaTeX (e.g., brew install --cask mactex)")
+    except Exception as e:
+        logger.error("pdflatex failed: %s", e)
+        if pdf_path.exists() and not _is_valid_pdf(pdf_path):
+            try:
+                pdf_path.unlink()
+            except Exception:
+                pass
         return None
 
 
@@ -383,6 +900,9 @@ def customize_cv_for_job(
         return None
 
     cv_dir = resolve_cv_dir(profile)
+    ensure_cv_scaffold(cv_dir)
+    # Ensure base files are real (not placeholders) before tailoring per-job.
+    ensure_base_cv_content(cv_dir, model=model)
     life_story_path = resolve_life_story_path(cv_dir)
 
     # Load master content
@@ -444,6 +964,7 @@ def customize_cv_for_job(
     (app_dir / "employment.tex").write_text(employment_tex, encoding="utf-8")
     (app_dir / "skills.tex").write_text(skills_tex, encoding="utf-8")
     (app_dir / "projects.tex").write_text(projects_tex, encoding="utf-8")
+    personalize_cv_header(app_dir)
 
     # Write job description for reference
     jd_content = f"# {title} at {company}\n\n**Location:** {location}\n**URL:** {job_url}\n\n---\n\n{description}"

@@ -12,8 +12,10 @@
             <th>Company</th>
             <th>Score</th>
             <th>Status</th>
+            <th>Recruiter Email</th>
             <th>CV</th>
             <th>Letter</th>
+            <th>Actions</th>
             <th>Created</th>
         </tr>
     </thead>
@@ -29,9 +31,14 @@
             </td>
             <td>
                 <span style="text-transform:capitalize;font-weight:600;
-                    color:{% if app.status == 'ready' %}#16a34a{% elif app.status == 'applied' %}#2563eb{% else %}#d97706{% endif %}">
+                    color:{% if app.status in ['ready','approved','sent'] %}#16a34a{% elif app.status == 'applied' %}#2563eb{% else %}#d97706{% endif %}">
                     {{ app.status }}
                 </span>
+            </td>
+            <td style="min-width:220px">
+                <input type="email" id="recruiter-email-{{ app.id }}" placeholder="recruiter@company.com"
+                       value="{{ app.recruiter_email or '' }}"
+                       onblur="setRecruiterEmail({{ app.id }}, this.value)" style="margin-bottom:0">
             </td>
             <td>
                 {% if app.cv_pdf_path %}
@@ -43,6 +50,16 @@
                 <a href="/download?path={{ app.cover_letter_pdf_path }}" target="_blank">PDF</a>
                 {% else %}—{% endif %}
             </td>
+            <td style="min-width:180px">
+                <div class="btn-group">
+                    <button class="btn-sm outline" onclick="approveSend({{ app.id }}, true)">Email me for review</button>
+                    <button class="btn-sm" style="background:#16a34a;border-color:#16a34a;color:#fff"
+                            onclick="approveSend({{ app.id }}, false)"
+                            {% if app.status not in ['ready','approved'] %}disabled{% endif %}>
+                        Approve &amp; Send
+                    </button>
+                </div>
+            </td>
             <td>{{ app.created_at[:10] if app.created_at else 'N/A' }}</td>
         </tr>
         {% endfor %}
@@ -51,4 +68,51 @@
 {% else %}
 <p>No applications generated yet. Go to a <a href="/jobs?min_score=0.4">high-match job</a> and click "Generate Application".</p>
 {% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function setRecruiterEmail(appId, email) {
+    try {
+        await fetch('/api/application/set-recruiter', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({app_id: appId, recruiter_email: email}),
+        });
+    } catch (e) {
+        console.error(e);
+    }
+}
+
+async function approveSend(appId, dryRun) {
+    const recruiterEmail = (document.getElementById(`recruiter-email-${appId}`)?.value || '').trim();
+    if (!recruiterEmail) {
+        alert('Please enter recruiter email first.');
+        return;
+    }
+    const btn = event.target;
+    btn.disabled = true;
+    const old = btn.textContent;
+    btn.textContent = dryRun ? 'Previewing...' : 'Sending...';
+    try {
+        const resp = await fetch('/api/application/approve-send', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({app_id: appId, recruiter_email: recruiterEmail, dry_run: dryRun}),
+        });
+        const data = await resp.json();
+        if (data.status === 'ok') {
+            alert(dryRun ? 'Review email sent to you (not sent to company).' : 'Sent to company!');
+            window.location.reload();
+        } else {
+            alert('Error: ' + (data.error || 'Unknown error'));
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = old;
+    }
+}
+</script>
 {% endblock %}
