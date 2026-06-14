@@ -64,6 +64,7 @@ export RAPIDAPI_KEY="your_key"</pre>
                     {{ "%.0f"|format(job.match_score * 100) }}%
                 </span>
                 <span class="board-badge board-{{ job.board }}">{{ job.board }}</span>
+                {% if job.is_remote %}<span class="remote-badge">🏠 Remote</span>{% endif %}
                 {% if job.applied %}<span class="applied-badge">Applied</span>{% endif %}
             </div>
             <div class="btn-group">

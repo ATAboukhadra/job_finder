@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from collections import Counter
 from pathlib import Path
 
-from models import Job
+from models import Job, classify_remote
 
 # Project root
 _PROJECT_ROOT = Path(__file__).parent
@@ -107,6 +107,7 @@ class JobMatcher:
             "experience": 0.05,
             "seniority": 0.10,
             "specialty": 0.10,
+            "remote": 0.10,
             "recency": 0.0,
         })
         # Ensure semantic weight exists for profiles with old-style weights
@@ -236,6 +237,15 @@ class JobMatcher:
         # 7. Seniority fit — penalize jobs requiring more seniority than preferred
         seniority_score = self._seniority_score(job)
 
+        # 8. Remote / home-office fit — classify and boost remote roles.
+        # Trust a source-provided remote flag (e.g. remote-only boards); text
+        # detection can only upgrade onsite→remote, never downgrade.
+        remote_type = classify_remote(job.title, job.description, job.location, job.job_type)
+        if job.is_remote and remote_type != "remote":
+            remote_type = "remote"
+        job.is_remote = remote_type == "remote"
+        remote_score = self._remote_score(remote_type)
+
         w = self.weights
         total = (
             w.get("title", 0.20) * title_score
@@ -245,6 +255,7 @@ class JobMatcher:
             + w.get("experience", 0.05) * experience_score
             + w.get("seniority", 0.10) * seniority_score
             + w.get("specialty", 0.10) * specialty_score
+            + w.get("remote", 0.10) * remote_score
         )
         # Final block: irrelevant jobs score 0
         if not self.is_relevant(job):
@@ -259,6 +270,8 @@ class JobMatcher:
             "experience_score": round(experience_score, 3),
             "seniority_score": round(seniority_score, 3),
             "specialty_score": round(specialty_score, 3),
+            "remote_score": round(remote_score, 3),
+            "remote_type": remote_type,
             "weighted_total": round(total, 3),
         }
 
@@ -284,6 +297,20 @@ class JobMatcher:
                 if region and region in text:
                     return 0.9
 
+        return 0.0
+
+    def _remote_score(self, remote_type: str) -> float:
+        """Boost remote / home-office roles; partial credit for hybrid.
+
+        When the user does not prefer remote, this stays neutral so it never
+        penalizes on-site roles they actually want.
+        """
+        if not self.profile.get("remote_preferred"):
+            return 0.5
+        if remote_type == "remote":
+            return 1.0
+        if remote_type == "hybrid":
+            return 0.6
         return 0.0
 
     def _recency_score(self, job: Job) -> float:

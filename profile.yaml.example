@@ -107,6 +107,7 @@ weights:
   semantic: 0.30    # Embedding similarity (broad relevance)
   location: 0.10    # Location preference match
   experience: 0.05  # Life-story text similarity
+  remote: 0.10      # Boost fully-remote / home-office roles (when remote_preferred: true)
 
 # --- Pipeline Automation ---
 pipeline:

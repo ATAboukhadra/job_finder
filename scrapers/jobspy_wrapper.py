@@ -83,6 +83,7 @@ def _df_to_jobs(df, board: JobBoard) -> list[Job]:
             salary=salary,
             date_posted=_clean(row.get("date_posted")),
             job_type=_clean(row.get("job_type")),
+            is_remote=bool(row.get("is_remote")),
         ))
     logger.info(f"  JobSpy {board.value}: {len(jobs)} jobs found")
     return jobs

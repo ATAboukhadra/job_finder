@@ -76,6 +76,7 @@ class ArbeitnowScraper:
                     salary="",
                     date_posted=datetime.fromtimestamp(int(created)).isoformat() if created else "",
                     job_type=", ".join(item.get("job_types", [])),
+                    is_remote=bool(remote),
                 )
                 if job.url and job.title:
                     jobs.append(job)

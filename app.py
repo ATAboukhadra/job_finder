@@ -72,6 +72,7 @@ def create_app():
         offset = (page - 1) * per_page
         board_filter = request.args.get("board", "")
         country_filter = request.args.get("country", "")
+        remote_filter = request.args.get("remote", "")  # "", "remote", "onsite"
         min_score_raw = float(request.args.get("min_score", 0))
         # Accept both 0-1 range and 0-100 percentage
         min_score = min_score_raw / 100.0 if min_score_raw > 1 else min_score_raw
@@ -87,6 +88,10 @@ def create_app():
         if country_filter:
             where.append("location LIKE ?")
             params.append(f"%{country_filter}%")
+        if remote_filter == "remote":
+            where.append("is_remote = 1")
+        elif remote_filter == "onsite":
+            where.append("is_remote = 0")
         if min_score > 0:
             where.append("match_score >= ?")
             params.append(min_score)
@@ -139,6 +144,7 @@ def create_app():
         return render_template("jobs.html",
             jobs=jobs, page=page, total_pages=total_pages, total=total,
             board_filter=board_filter, country_filter=country_filter,
+            remote_filter=remote_filter,
             min_score=min_score, search=search, sort=sort,
             boards=[b.value for b in JobBoard], countries=countries)
 
@@ -264,6 +270,7 @@ def create_app():
                 title=r["title"], company=r["company"], location=r["location"],
                 url=r["url"], board=JobBoard(r["board"]),
                 description=r["description"] or "", salary=r["salary"] or "",
+                job_type=r["job_type"] or "", is_remote=bool(r["is_remote"]),
             ))
         ranked = matcher.rank(jobs)
         update_scores(ranked)

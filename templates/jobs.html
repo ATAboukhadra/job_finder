@@ -27,6 +27,14 @@
         </select>
     </div>
     <div>
+        <label for="remote">Work mode</label>
+        <select name="remote" id="remote">
+            <option value="">All</option>
+            <option value="remote" {% if remote_filter == 'remote' %}selected{% endif %}>Remote / Home office</option>
+            <option value="onsite" {% if remote_filter == 'onsite' %}selected{% endif %}>On-site / Hybrid</option>
+        </select>
+    </div>
+    <div>
         <label for="min_score">Min Score (%)</label>
         <input type="number" name="min_score" id="min_score" value="{{ "%.0f"|format(min_score * 100) }}"
                min="0" max="100" step="5" placeholder="0" style="width:5rem">
@@ -56,6 +64,7 @@
                     {{ "%.0f"|format(job.match_score * 100) }}%
                 </span>
                 <span class="board-badge board-{{ job.board }}">{{ job.board }}</span>
+                {% if job.is_remote %}<span class="remote-badge">🏠 Remote</span>{% endif %}
                 {% if job.applied %}<span class="applied-badge">Applied</span>{% endif %}
             </div>
             <div class="btn-group">
@@ -93,11 +102,11 @@
 {% if total_pages > 1 %}
 <div class="pagination">
     {% if page > 1 %}
-    <a href="?page={{ page - 1 }}&board={{ board_filter }}&country={{ country_filter }}&min_score={{ min_score }}&q={{ search }}&sort={{ sort }}" role="button" class="outline">&laquo; Prev</a>
+    <a href="?page={{ page - 1 }}&board={{ board_filter }}&country={{ country_filter }}&remote={{ remote_filter }}&min_score={{ min_score }}&q={{ search }}&sort={{ sort }}" role="button" class="outline">&laquo; Prev</a>
     {% endif %}
     <span style="padding:0.5rem">Page {{ page }} / {{ total_pages }}</span>
     {% if page < total_pages %}
-    <a href="?page={{ page + 1 }}&board={{ board_filter }}&country={{ country_filter }}&min_score={{ min_score }}&q={{ search }}&sort={{ sort }}" role="button" class="outline">Next &raquo;</a>
+    <a href="?page={{ page + 1 }}&board={{ board_filter }}&country={{ country_filter }}&remote={{ remote_filter }}&min_score={{ min_score }}&q={{ search }}&sort={{ sort }}" role="button" class="outline">Next &raquo;</a>
     {% endif %}
 </div>
 {% endif %}

@@ -67,6 +67,7 @@ class RemotiveScraper:
                     salary=item.get("salary", ""),
                     date_posted=item.get("publication_date", ""),
                     job_type=item.get("job_type", ""),
+                    is_remote=True,  # Remotive lists remote jobs only
                 )
                 if job.title:
                     jobs.append(job)

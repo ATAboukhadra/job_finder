@@ -26,6 +26,7 @@
                 </span>
                 <br>
                 <span class="board-badge board-{{ job.board }}" style="margin-top:0.3rem">{{ job.board }}</span>
+                {% if job.is_remote %}<span class="remote-badge">🏠 Remote</span>{% endif %}
                 {% if job.applied %}<span class="applied-badge">Applied</span>{% endif %}
             </div>
         </div>

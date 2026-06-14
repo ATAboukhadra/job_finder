@@ -25,6 +25,7 @@ def get_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
             salary TEXT,
             date_posted TEXT,
             job_type TEXT,
+            is_remote INTEGER DEFAULT 0,
             scraped_at TEXT,
             match_score REAL DEFAULT 0,
             match_details TEXT DEFAULT '{}',
@@ -62,6 +63,8 @@ def get_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
             "sent_at": "TEXT DEFAULT ''",
         },
     )
+    if _ensure_columns(conn, "jobs", {"is_remote": "INTEGER DEFAULT 0"}):
+        _backfill_is_remote(conn)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS pipeline_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,15 +91,40 @@ def get_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
     return conn
 
 
-def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
-    """Add columns if missing (SQLite ALTER TABLE ADD COLUMN)."""
+def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> bool:
+    """Add columns if missing (SQLite ALTER TABLE ADD COLUMN).
+
+    Returns True if any column was added (useful for triggering backfills).
+    """
     try:
         existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     except Exception:
-        return
+        return False
+    added = False
     for name, ddl in columns.items():
         if name not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+            added = True
+    conn.commit()
+    return added
+
+
+def _backfill_is_remote(conn: sqlite3.Connection) -> None:
+    """Classify remote/home-office for rows that predate the is_remote column."""
+    from models import classify_remote
+
+    rows = conn.execute(
+        "SELECT url, title, description, location, job_type FROM jobs"
+    ).fetchall()
+    for r in rows:
+        is_remote = classify_remote(
+            r["title"] or "", r["description"] or "",
+            r["location"] or "", r["job_type"] or "",
+        ) == "remote"
+        conn.execute(
+            "UPDATE jobs SET is_remote = ? WHERE url = ?",
+            (1 if is_remote else 0, r["url"]),
+        )
     conn.commit()
 
 
@@ -266,13 +294,14 @@ def save_jobs(jobs: List[Job], db_path: Path = DB_PATH) -> int:
             conn.execute(
                 """INSERT OR IGNORE INTO jobs
                    (url, title, company, location, board, description,
-                    salary, date_posted, job_type, scraped_at, match_score, match_details)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    salary, date_posted, job_type, is_remote, scraped_at,
+                    match_score, match_details)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job.url, job.title, job.company, job.location,
                     job.board.value, job.description, job.salary,
-                    job.date_posted, job.job_type, job.scraped_at,
-                    job.match_score, json.dumps(job.match_details),
+                    job.date_posted, job.job_type, 1 if job.is_remote else 0,
+                    job.scraped_at, job.match_score, json.dumps(job.match_details),
                 ),
             )
             seen_fingerprints.add(fingerprint)
@@ -289,8 +318,8 @@ def update_scores(jobs: List[Job], db_path: Path = DB_PATH):
     conn = get_db(db_path)
     for job in jobs:
         conn.execute(
-            "UPDATE jobs SET match_score = ?, match_details = ? WHERE url = ?",
-            (job.match_score, json.dumps(job.match_details), job.url),
+            "UPDATE jobs SET match_score = ?, match_details = ?, is_remote = ? WHERE url = ?",
+            (job.match_score, json.dumps(job.match_details), 1 if job.is_remote else 0, job.url),
         )
     conn.commit()
     conn.close()

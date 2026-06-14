@@ -237,6 +237,7 @@ def cmd_match(args):
             salary=r["salary"] or "",
             date_posted=r["date_posted"] or "",
             job_type=r["job_type"] or "",
+            is_remote=bool(r["is_remote"]),
             scraped_at=r["scraped_at"] or "",
         ))
 

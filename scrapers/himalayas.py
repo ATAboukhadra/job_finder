@@ -86,6 +86,7 @@ class HimalayasScraper:
                     salary=salary,
                     date_posted=item.get("pubDate", ""),
                     job_type=item.get("employmentType", ""),
+                    is_remote=True,  # Himalayas is remote-first / remote-only
                 )
                 if job.url and job.title:
                     jobs.append(job)
