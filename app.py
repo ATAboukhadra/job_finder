@@ -19,6 +19,7 @@ from storage import (
     mark_applied, mark_hidden, DB_PATH,
     get_applications, get_application_by_job,
     get_pipeline_runs,
+    update_application,
 )
 
 logger = logging.getLogger(__name__)
@@ -416,6 +417,127 @@ def create_app():
         thread = threading.Thread(target=generate)
         thread.start()
         return jsonify({"status": "ok", "message": "Generating application in background..."})
+
+    @app.route("/api/application/set-recruiter", methods=["POST"])
+    def api_set_recruiter():
+        data = request.json or {}
+        app_id = data.get("app_id")
+        recruiter_email = (data.get("recruiter_email") or "").strip()
+        if not app_id:
+            return jsonify({"status": "error", "error": "app_id required"}), 400
+        update_application(int(app_id), recruiter_email=recruiter_email)
+        return jsonify({"status": "ok"})
+
+    @app.route("/api/application/approve-send", methods=["POST"])
+    def api_approve_and_send():
+        """Approve an application and send the email.
+
+        If `dry_run` is true, we send a *review email to the user* (with attachments)
+        and DO NOT email the recruiter.
+        """
+        from datetime import datetime as _dt
+        # Import lazily so review-email flow works even if email-sender module changes.
+        from applier import send_application_email, prepare_application_package
+        from notifier import send_review_email
+
+        data = request.json or {}
+        app_id = data.get("app_id")
+        recruiter_email = (data.get("recruiter_email") or "").strip()
+        dry_run = bool(data.get("dry_run", False))
+
+        if not app_id:
+            return jsonify({"status": "error", "error": "app_id required"}), 400
+
+        conn = get_db()
+        row = conn.execute(
+            """SELECT a.*, j.title, j.company, j.location, j.url as job_url
+               FROM applications a JOIN jobs j ON a.job_url = j.url
+               WHERE a.id = ?""",
+            (int(app_id),),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return jsonify({"status": "error", "error": "Application not found"}), 404
+
+        app_row = dict(row)
+        to_email = recruiter_email or (app_row.get("recruiter_email") or "").strip()
+        # For dry_run (review email), recruiter email is optional.
+        if not dry_run and not to_email:
+            return jsonify({"status": "error", "error": "Recruiter email required"}), 400
+
+        # Prepare attachments from application directory
+        if not app_row.get("cv_pdf_path"):
+            return jsonify({"status": "error", "error": "CV not generated yet"}), 400
+        app_dir = Path(app_row["cv_pdf_path"]).parent
+        package = prepare_application_package(app_dir)
+        if not package.get("cv"):
+            return jsonify({"status": "error", "error": "CV PDF not found"}), 400
+
+        # Use cover-letter.md (if present) as email body
+        subject = app_row.get("email_subject") or f"Application for {app_row['title']} - Ibrahim Abdullaziz"
+        md_cl = app_dir / "cover-letter.md"
+        body = ""
+        if md_cl.exists():
+            body = md_cl.read_text(encoding="utf-8")
+        if not body:
+            body = (
+                f"Hello,\n\nPlease find my application for the {app_row['title']} position at "
+                f"{app_row['company']}.\n\nBest regards,\nIbrahim Abdullaziz"
+            )
+
+        if dry_run:
+            # Store recruiter email and mark review sent (but NOT approved/sent)
+            update_application(
+                int(app_id),
+                recruiter_email=to_email or "",
+                status="review_sent",
+                email_subject=subject,
+                email_body=body,
+            )
+
+            # Send a review email to YOU with attachments.
+            profile = load_profile()
+            recipient = profile.get("pipeline", {}).get("email_recipient") or ""
+            if recipient:
+                try:
+                    send_review_email(
+                        job={
+                            "title": app_row["title"],
+                            "company": app_row["company"],
+                            "url": app_row["job_url"],
+                            "match_score": app_row.get("match_score", 0) or 0,
+                        },
+                        cv_path=Path(package["cv"]),
+                        cl_path=Path(package["cover_letter"]) if package.get("cover_letter") else None,
+                        recipient=recipient,
+                    )
+                except Exception as e:
+                    # Always return JSON so the UI doesn't choke on HTML error pages.
+                    return jsonify({"status": "error", "error": f"Failed to send review email: {e}"}), 500
+            return jsonify({"status": "ok", "sent": False, "dry_run": True, "review_emailed": bool(recipient)})
+
+        # Mark approved (and store recruiter email)
+        update_application(
+            int(app_id),
+            recruiter_email=to_email,
+            approved_at=_dt.now().isoformat(),
+            status="approved",
+            email_subject=subject,
+            email_body=body,
+        )
+
+        ok = send_application_email(
+            to_email=to_email,
+            subject=subject,
+            body=body,
+            cv_path=package["cv"],
+            cover_letter_path=package.get("cover_letter"),
+        )
+
+        if ok:
+            update_application(int(app_id), status="sent", sent_at=_dt.now().isoformat())
+            return jsonify({"status": "ok", "sent": True})
+        return jsonify({"status": "error", "error": "Failed to send email"}), 500
 
     def _fetch_and_score(url: str, location: str = "") -> dict:
         """Fetch a job URL, extract description, score against profile. Returns score dict."""

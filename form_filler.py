@@ -1,12 +1,10 @@
-"""Application form auto-filler using Chrome MCP.
+"""Application form auto-filler instruction builder.
 
-This module prepares form-filling instructions for the Chrome MCP tools.
-It maps pre-generated answers to form fields and provides a structured
-workflow for auto-filling application forms with user review before submit.
+This module prepares form-filling instructions:
+- static fields from your `life-story.md` (preferred) / `profile.yaml` (fallback)
+- dynamic fields from pre-generated answers stored in SQLite
 
-NOTE: Chrome MCP tools (navigate, read_page, form_input, file_upload) are
-only available within a Claude agent session. This module generates the
-fill instructions; the actual MCP calls are made by the agent.
+It does NOT submit anything by itself.
 """
 
 import json
@@ -14,44 +12,46 @@ import logging
 from typing import Dict, List, Optional
 
 from storage import get_application_by_job
+from user_profile import load_person, split_name
 
 logger = logging.getLogger(__name__)
 
 # Common field name patterns and what answer to map them to
-FIELD_MAPPINGS = {
-    # Name fields
-    "first_name": "Ahmed",
-    "last_name": "Tawfik Aboukhadra",
-    "full_name": "Ahmed Tawfik Aboukhadra",
-    "name": "Ahmed Tawfik Aboukhadra",
+def _static_field_mappings() -> Dict[str, str]:
+    person = load_person()
+    first, last = split_name(person.full_name)
 
-    # Contact
-    "email": "ahmed.tawfik96@gmail.com",
-    "phone": "",  # User should fill
-    "linkedin": "https://www.linkedin.com/in/ahmed-tawfik-aboukhadra/",
-    "github": "https://github.com/ATAboukhadra",
-    "website": "https://ataboukhadra.github.io/",
-    "portfolio": "https://ataboukhadra.github.io/",
+    # Best-effort split of location into city/country.
+    city, country = "", ""
+    if person.location:
+        parts = [p.strip() for p in person.location.split(",") if p.strip()]
+        if len(parts) >= 2:
+            city, country = parts[0], parts[-1]
+        else:
+            country = parts[0]
 
-    # Location
-    "city": "Kaiserslautern",
-    "country": "Germany",
-    "address": "Kaiserslautern, Germany",
-    "location": "Kaiserslautern, Germany",
+    # Keep a few common aliases that forms use.
+    return {
+        # Name
+        "first_name": first,
+        "last_name": last,
+        "full_name": person.full_name,
+        "name": person.full_name,
 
-    # Education
-    "degree": "PhD in Computer Science (expected 2026)",
-    "university": "RPTU Kaiserslautern-Landau",
-    "school": "RPTU Kaiserslautern-Landau",
-    "education": "PhD Computer Science, RPTU Kaiserslautern (2021-Present); MSc AI, Maastricht University (2019-2021); BSc CS&E, German University in Cairo (2014-2019)",
-    "gpa": "8.33/10 (MSc), 1.06/A (BSc)",
+        # Contact
+        "email": person.email,
+        "phone": person.phone,
+        "linkedin": person.linkedin,
+        "github": person.github,
+        "website": person.website,
+        "portfolio": person.website,
 
-    # Work
-    "current_company": "DFKI - German Research Center for AI",
-    "current_title": "Researcher - Computer Vision & 3D Reconstruction",
-    "years_experience": "5+",
-    "experience": "5+ years in computer vision and deep learning research",
-}
+        # Location
+        "city": city,
+        "country": country,
+        "address": person.location,
+        "location": person.location,
+    }
 
 
 def get_fill_instructions(job_url: str) -> Optional[Dict]:
@@ -78,7 +78,7 @@ def get_fill_instructions(job_url: str) -> Optional[Dict]:
 
     return {
         "application_url": job_url,
-        "static_fields": FIELD_MAPPINGS.copy(),
+        "static_fields": _static_field_mappings(),
         "dynamic_fields": answers,
         "cv_pdf_path": app.get("cv_pdf_path", ""),
         "cover_letter_pdf_path": app.get("cover_letter_pdf_path", ""),

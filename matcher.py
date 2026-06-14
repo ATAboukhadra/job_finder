@@ -1,4 +1,8 @@
-"""Job matching engine — scores jobs against a user profile using semantic embeddings."""
+"""Job matching engine — scores jobs against a user profile using semantic embeddings.
+
+This matcher is domain-agnostic: it scores based on the user's `profile.yaml`
+(skills/titles/keywords/locations) + optional negative keywords.
+"""
 
 import re
 import math
@@ -9,7 +13,9 @@ from pathlib import Path
 
 from models import Job
 
-LIFE_STORY_PATH = Path(__file__).parent.parent / "CV" / "life-story.md"
+# Project root
+_PROJECT_ROOT = Path(__file__).parent
+LIFE_STORY_PATH = _PROJECT_ROOT / "life-story.md"
 
 logger = logging.getLogger(__name__)
 
@@ -29,46 +35,6 @@ def _get_model():
     return _model
 
 
-# Keywords that indicate AI/ML/CV relevance — a job must contain at least one
-AI_KEYWORDS = {
-    # Core ML/AI
-    "machine learning", "deep learning", "artificial intelligence", "neural network",
-    "reinforcement learning", "supervised learning", "unsupervised learning",
-    "ml", "ai", "dl",
-    # CV / 3D
-    "computer vision", "image processing", "object detection", "image recognition",
-    "3d reconstruction", "point cloud", "lidar", "depth estimation", "stereo vision",
-    "gaussian splatting", "nerf", "neural rendering", "slam", "visual odometry",
-    "pose estimation", "segmentation", "tracking",
-    # NLP / LLM / VLM
-    "natural language processing", "nlp", "llm", "large language model",
-    "vision language", "vlm", "gpt", "transformer", "bert", "generative ai",
-    "gen ai", "genai", "prompt engineering", "rag", "retrieval augmented",
-    # Frameworks / tools (strong signal)
-    "pytorch", "tensorflow", "jax", "keras", "huggingface", "cuda",
-    "tensorrt", "onnx", "diffusion model", "stable diffusion",
-    # Roles (strong signal in title)
-    "data scientist", "research scientist", "applied scientist",
-    "ml engineer", "ai engineer", "perception engineer",
-    # Domains
-    "autonomous driving", "self-driving", "adas", "robotics perception",
-    "robot learning", "embodied ai", "physical ai", "digital twin",
-    "medical imaging", "speech recognition", "recommender system",
-}
-
-# Keywords that indicate a strong specialty match for Ahmed's specific background.
-# Jobs containing these score higher than generic ML/AI roles.
-SPECIALTY_KEYWORDS = {
-    "computer vision", "3d reconstruction", "gaussian splatting", "nerf",
-    "neural rendering", "depth estimation", "stereo vision", "point cloud",
-    "pose estimation", "slam", "visual odometry", "multi-view", "scene reconstruction",
-    "differentiable rendering", "hand pose", "object detection", "segmentation",
-    "perception", "robotics perception", "autonomous driving", "self-driving",
-    "adas", "lidar", "embodied ai", "physical ai", "robot learning",
-    "vision language", "vlm", "multimodal", "diffusion model",
-    "3d vision", "3d scene", "augmented reality", "mixed reality",
-    "cvpr", "iccv", "eccv", "neurips",
-}
 
 SENIORITY_LEVELS = {
     "intern": 0,
@@ -78,12 +44,6 @@ SENIORITY_LEVELS = {
     "staff": 4,
     "principal": 5,
 }
-
-
-def is_ai_related(job: Job) -> bool:
-    """Check if a job is AI/ML/CV related based on title and description."""
-    text = f"{job.title} {job.description}".lower()
-    return any(kw in text for kw in AI_KEYWORDS)
 
 
 def tokenize(text: str) -> list[str]:
@@ -163,6 +123,10 @@ class JobMatcher:
         self._preferred_seniority = self._normalize_preferred_seniority(
             profile.get("seniority_level", "mid")
         )
+        self._specialty_keywords = [kw.lower() for kw in profile.get("keywords", [])]
+        self._negative_keywords = [kw.lower() for kw in profile.get("negative_keywords", [])]
+        self._strict_specialty = bool(profile.get("strict_specialty_filter", False))
+        self._preferred_regions = [r.lower() for r in profile.get("preferred_regions", [])]
 
         # Load life-story for experience matching
         life_story_text = load_life_story()
@@ -193,6 +157,18 @@ class JobMatcher:
             parts.append("Background: " + life_story[:1500])
 
         return " ".join(parts)
+
+    def is_relevant(self, job: Job) -> bool:
+        """Blocklist + optional strict specialty filter."""
+        text = f"{job.title} {job.description}".lower()
+        if self._negative_keywords:
+            for kw in self._negative_keywords:
+                if kw and kw in text:
+                    return False
+        if self._strict_specialty and self._specialty_keywords:
+            if not any(kw in text for kw in self._specialty_keywords):
+                return False
+        return True
 
     def _get_profile_embedding(self):
         """Compute and cache profile embedding."""
@@ -244,15 +220,7 @@ class JobMatcher:
         semantic_score = self._semantic_score(job)
 
         # 4. Location match
-        location_score = 0.0
-        if self._locations:
-            job_loc = job.location.lower()
-            for pref_loc in self._locations:
-                if pref_loc in job_loc or job_loc in pref_loc:
-                    location_score = 1.0
-                    break
-            if self.profile.get("remote_preferred") and "remote" in job_loc:
-                location_score = 1.0
+        location_score = self._location_score(job)
 
         # 5. Experience match — life-story TF-IDF (lightweight supplement)
         experience_score = 0.0
@@ -260,7 +228,10 @@ class JobMatcher:
             experience_score = cosine_sim(job_tf, self._life_story_tf)
 
         # 6. Specialty boost — CV/3D/robotics/perception keyword density
-        specialty_score = self._specialty_score(job)
+        specialty_score = 0.0
+        if self._specialty_keywords:
+            hits = sum(1 for kw in self._specialty_keywords if kw in job_text)
+            specialty_score = min(1.0, hits / 5.0)
 
         # 7. Seniority fit — penalize jobs requiring more seniority than preferred
         seniority_score = self._seniority_score(job)
@@ -275,7 +246,10 @@ class JobMatcher:
             + w.get("seniority", 0.10) * seniority_score
             + w.get("specialty", 0.10) * specialty_score
         )
-        total = min(total, 1.0)
+        # Final block: irrelevant jobs score 0
+        if not self.is_relevant(job):
+            total = 0.0
+        total = min(max(total, 0.0), 1.0)
 
         details = {
             "title_score": round(title_score, 3),
@@ -290,13 +264,27 @@ class JobMatcher:
 
         return round(total, 3), details
 
-    def _specialty_score(self, job: Job) -> float:
-        """Boost jobs that match Ahmed's specific CV/3D/robotics/perception background.
-        Returns 0-1 based on fraction of specialty keywords present in the job text."""
-        text = f"{job.title} {job.description}".lower()
-        hits = sum(1 for kw in SPECIALTY_KEYWORDS if kw in text)
-        # Saturates at 5 matches → score 1.0
-        return min(1.0, hits / 5.0)
+    def _location_score(self, job: Job) -> float:
+        """Score location with strong boost for Remote + preferred regions/countries."""
+        text = f"{job.location} {job.title} {job.description[:500]}".lower()
+
+        # Remote preference
+        if self.profile.get("remote_preferred") and any(k in text for k in ["remote", "work from home", "wfh"]):
+            return 1.0
+
+        # Preferred explicit locations
+        if self._locations:
+            for pref in self._locations:
+                if pref and pref in text:
+                    return 1.0
+
+        # Preferred regions (e.g. Middle East / MENA)
+        if self._preferred_regions:
+            for region in self._preferred_regions:
+                if region and region in text:
+                    return 0.9
+
+        return 0.0
 
     def _recency_score(self, job: Job) -> float:
         """Score from 0-1 based on how recently the job was posted. 1.0 = today."""
@@ -345,8 +333,20 @@ class JobMatcher:
     def _seniority_score(self, job: Job) -> float:
         level = self._extract_job_seniority_level(job)
         if level is None:
-            return 0.5
+            # Unknown seniority: neutral-ish
+            return 0.45
 
+        # If user wants internships/entry-level, be more strict against senior roles.
+        if self._preferred_seniority <= SENIORITY_LEVELS["junior"]:
+            if level == SENIORITY_LEVELS["intern"]:
+                return 1.0
+            if level == SENIORITY_LEVELS["junior"]:
+                return 0.75
+            if level == SENIORITY_LEVELS["mid"]:
+                return 0.25
+            return 0.0
+
+        # General case
         delta = level - self._preferred_seniority
         if delta <= -1:
             return 0.9
@@ -357,28 +357,18 @@ class JobMatcher:
         return 0.0
 
     def rank(self, jobs: list[Job], min_score: float = 0.0) -> list[Job]:
-        """Score, filter non-AI jobs, and return sorted by score (descending), then date."""
-        # Filter out non-AI/ML/CV jobs
-        ai_jobs = [j for j in jobs if is_ai_related(j)]
-        filtered_count = len(jobs) - len(ai_jobs)
-        if filtered_count > 0:
-            logger.info(f"Filtered out {filtered_count} non-AI jobs")
-
-        # Batch encode job texts for efficiency
+        """Score and sort jobs."""
         model = _get_model()
-        profile_emb = self._get_profile_embedding()
-
-        # Pre-compute all job embeddings in a batch
-        job_texts = [f"{j.title}. {j.company}. {j.description[:2000]}" for j in ai_jobs]
+        job_texts = [f"{j.title}. {j.company}. {j.description[:2000]}" for j in jobs]
         if job_texts:
             logger.info(f"Computing embeddings for {len(job_texts)} jobs...")
             job_embeddings = model.encode(job_texts, normalize_embeddings=True,
                                           batch_size=64, show_progress_bar=len(job_texts) > 50)
             # Cache embeddings on jobs for the scoring step
-            for job, emb in zip(ai_jobs, job_embeddings):
+            for job, emb in zip(jobs, job_embeddings):
                 job._cached_embedding = emb
 
-        for job in ai_jobs:
+        for job in jobs:
             score, details = self.score(job)
             job.match_score = score
             job.match_details = details
@@ -392,7 +382,7 @@ class JobMatcher:
             if not d or not isinstance(d, str):
                 return "0000"
             return d if d.lower() not in ("nan", "none", "nat") else "0000"
-        ranked = sorted(ai_jobs, key=lambda j: (j.match_score, _date_key(j)), reverse=True)
+        ranked = sorted(jobs, key=lambda j: (j.match_score, _date_key(j)), reverse=True)
         if min_score > 0:
             ranked = [j for j in ranked if j.match_score >= min_score]
 

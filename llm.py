@@ -7,6 +7,7 @@ Model recommendations by hardware:
 
 import json
 import logging
+import os
 import platform
 import subprocess
 import time
@@ -19,6 +20,20 @@ logger = logging.getLogger(__name__)
 OLLAMA_BASE = "http://localhost:11434"
 DEFAULT_MODEL = "qwen3.5:9b"
 CPU_MODEL = "qwen2.5:3b"
+DEFAULT_TIMEOUT_SECONDS = 900  # CPU can be slow; allow long generations by default.
+
+
+def _default_timeout() -> int:
+    """Configurable default timeout for Ollama requests."""
+    raw = os.environ.get("OLLAMA_TIMEOUT_SECONDS", "").strip()
+    if raw:
+        try:
+            val = int(raw)
+            if val > 0:
+                return val
+        except Exception:
+            pass
+    return DEFAULT_TIMEOUT_SECONDS
 
 
 def detect_hardware() -> str:
@@ -82,7 +97,7 @@ def generate(
     model: str = DEFAULT_MODEL,
     temperature: float = 0.3,
     max_tokens: int = 4000,
-    timeout: int = 300,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> str:
     """Generate text using Ollama.
 
@@ -116,7 +131,7 @@ def generate(
         r = requests.post(
             f"{OLLAMA_BASE}/api/generate",
             json=payload,
-            timeout=timeout,
+            timeout=timeout or _default_timeout(),
         )
         r.raise_for_status()
         result = r.json()
@@ -138,7 +153,7 @@ def generate_structured(
     model: str = DEFAULT_MODEL,
     temperature: float = 0.2,
     max_tokens: int = 4000,
-    timeout: int = 300,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> Dict[str, Any]:
     """Generate structured JSON output from LLM.
 
@@ -154,7 +169,7 @@ def generate_structured(
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
-            timeout=timeout,
+            timeout=timeout or _default_timeout(),
         )
 
         # Strip markdown code fences if present
@@ -186,7 +201,7 @@ def generate_latex(
     model: str = DEFAULT_MODEL,
     temperature: float = 0.2,
     max_tokens: int = 4000,
-    timeout: int = 300,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> str:
     """Generate LaTeX content, stripping any markdown fences."""
     text = generate(
@@ -195,7 +210,7 @@ def generate_latex(
         model=model,
         temperature=temperature,
         max_tokens=max_tokens,
-        timeout=timeout,
+        timeout=timeout or _default_timeout(),
     )
 
     # Strip markdown code fences

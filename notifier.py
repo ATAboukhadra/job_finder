@@ -10,6 +10,8 @@ import os
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
+from pathlib import Path
 from typing import List, Dict, Optional
 
 from storage import get_last_email_sent, get_new_jobs_since, log_email_sent
@@ -143,6 +145,68 @@ def send_digest_email(
     """
     if not jobs:
         logger.info("No new jobs to send in digest")
+        return False
+
+
+def send_review_email(
+    job: Dict,
+    cv_path: Path,
+    cl_path: Optional[Path],
+    recipient: str,
+    gmail_user: Optional[str] = None,
+    gmail_app_password: Optional[str] = None,
+) -> bool:
+    """Send a review email to the user with tailored CV/Cover Letter attached."""
+    gmail_user = gmail_user or os.environ.get("GMAIL_USER", recipient)
+    gmail_app_password = gmail_app_password or os.environ.get("GMAIL_APP_PASSWORD", "")
+
+    if not gmail_app_password:
+        logger.error("GMAIL_APP_PASSWORD not set; cannot send review email.")
+        return False
+
+    title = job.get("title", "Job")
+    company = job.get("company", "Company")
+    url = job.get("url", "")
+    score = job.get("match_score", 0) or 0
+
+    subject = f"ACTION REQUIRED: Review Application for {title} at {company}"
+
+    html_body = f"""
+    <html><body style="font-family: sans-serif; color: #333;">
+        <h2 style="color: #1a1a2e;">Application Review: {title}</h2>
+        <p><b>Company:</b> {company}</p>
+        <p><b>Match Score:</b> {score:.0%}</p>
+        <p><b>Job URL:</b> <a href="{url}">{url}</a></p>
+        <hr>
+        <p>
+            The tailored CV and Cover Letter PDFs are attached.
+            After you review them, go back to the app and click <b>Approve &amp; Send</b>.
+        </p>
+    </body></html>
+    """
+
+    msg = MIMEMultipart()
+    msg["Subject"] = subject
+    msg["From"] = gmail_user
+    msg["To"] = recipient
+    msg.attach(MIMEText(html_body, "html"))
+
+    # Attachments
+    for path in [cv_path, cl_path]:
+        if path and path.exists():
+            with open(path, "rb") as f:
+                part = MIMEApplication(f.read(), Name=path.name)
+            part["Content-Disposition"] = f'attachment; filename="{path.name}"'
+            msg.attach(part)
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(gmail_user, gmail_app_password)
+            server.send_message(msg)
+        logger.info("Review email sent for %s", title)
+        return True
+    except Exception as e:
+        logger.error("Failed to send review email: %s", e)
         return False
 
     gmail_user = gmail_user or os.environ.get("GMAIL_USER", recipient)

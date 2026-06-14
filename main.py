@@ -32,6 +32,13 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
 
+# Avoid Windows console Unicode crashes when printing job titles.
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 from models import Job, JobBoard, SearchQuery
 from scrapers import SCRAPERS
 from matcher import JobMatcher
