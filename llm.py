@@ -116,6 +116,9 @@ def generate(
         "model": model,
         "prompt": prompt,
         "stream": False,
+        # Disable chain-of-thought for "thinking" models (e.g. qwen3.x) so the
+        # full answer lands in `response` instead of the `thinking` field.
+        "think": False,
         "options": {
             "temperature": temperature,
             "num_predict": max_tokens,
@@ -135,7 +138,7 @@ def generate(
         )
         r.raise_for_status()
         result = r.json()
-        text = result.get("response", "")
+        text = result.get("response", "") or result.get("thinking", "")
         elapsed = time.time() - start
         logger.info("LLM response: %d chars in %.1fs", len(text), elapsed)
         return text.strip()
