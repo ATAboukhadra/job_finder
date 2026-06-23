@@ -6,6 +6,9 @@ Fully automated job application system: scrapes listings from multiple job sourc
 
 ## Screenshots
 
+
+
+
 ### Dashboard
 ![Dashboard](screenshots/dashboard.png)
 

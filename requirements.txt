@@ -5,5 +5,6 @@ lxml>=4.9
 flask>=3.0
 python-dotenv>=1.0
 sentence-transformers>=2.2
-python-jobspy>=0.1.0
+numpy>=2.0.0
+python-jobspy==1.1.58
 ddgs>=0.1
