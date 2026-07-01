@@ -815,7 +815,13 @@ def create_app():
     @app.route("/graph")
     def graph_page():
         import graph_storage as gs
-        return render_template("graph.html", runs=gs.list_runs(), presets=GRAPH_PRESETS)
+        import graph_search as gsx
+        presets = []
+        for p in GRAPH_PRESETS:
+            a = gsx.anchor_seeds(p["region"])
+            names = a["organizations"][:8] + a["people"][:4]
+            presets.append({**p, "anchors": ", ".join(names)})
+        return render_template("graph.html", runs=gs.list_runs(), presets=presets)
 
     @app.route("/api/graph/crawl", methods=["POST"])
     def api_graph_crawl():
@@ -828,6 +834,10 @@ def create_app():
         max_depth = max(1, min(int(data.get("depth", 3)), 4))
         max_companies = max(1, min(int(data.get("max_companies", 100)), 300))
         region_only = bool(data.get("region_only", True))
+        include_anchors = bool(data.get("include_anchors", True))
+        seeds = data.get("seeds", "")
+        if isinstance(seeds, list):
+            seeds = ", ".join(str(s) for s in seeds)
 
         run_id = gs.create_run(region, term, max_depth, max_companies)
 
@@ -837,7 +847,8 @@ def create_app():
                 profile = load_profile()
                 GraphCrawler(run_id, region, term, profile,
                              max_depth=max_depth, max_companies=max_companies,
-                             region_only=region_only).run()
+                             region_only=region_only, include_anchors=include_anchors,
+                             extra_seeds=seeds).run()
             except Exception as e:
                 logger.error("Graph crawl thread failed: %s", e)
                 gs.update_run(run_id, status="failed")

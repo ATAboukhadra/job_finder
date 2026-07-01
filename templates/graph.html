@@ -42,7 +42,7 @@
     <div class="preset-row">
         <strong style="align-self:center;font-size:0.85rem;opacity:0.7;">Presets:</strong>
         {% for p in presets %}
-        <span class="preset-chip" onclick="applyPreset('{{ p.region }}', '{{ p.term }}')">{{ p.region }} · {{ p.term }}</span>
+        <span class="preset-chip" onclick="applyPreset('{{ p.region }}', '{{ p.term }}', {{ p.anchors|tojson }})">{{ p.region }} · {{ p.term }}</span>
         {% endfor %}
     </div>
     <div class="crawl-form">
@@ -70,6 +70,16 @@
         <input type="checkbox" id="region-only" checked style="margin:0;">
         Only companies &amp; positions located in the country (recommended)
     </label>
+    <details style="margin-top:0.7rem;" open>
+        <summary style="cursor:pointer;font-size:0.85rem;font-weight:600;">Start from anchor entities (flagship AI orgs &amp; people)</summary>
+        <label style="display:flex;align-items:center;gap:0.4rem;margin:0.5rem 0;font-size:0.85rem;">
+            <input type="checkbox" id="use-anchors" checked style="margin:0;">
+            Seed the crawl from these entities and expand outward
+        </label>
+        <textarea id="seeds" rows="2" placeholder="e.g. MBZUAI, G42, Technology Innovation Institute, Peng Xiao"
+                  style="font-size:0.85rem;"></textarea>
+        <small style="opacity:0.6;">Comma-separated. Presets prefill this with the region's known AI anchors — edit or add your own companies/people.</small>
+    </details>
 </div>
 
 <div id="run-area" style="display:none;">
@@ -139,9 +149,10 @@
 const NODE_COLORS = { term:'#7c3aed', region:'#4b5563', page:'#0ea5e9', company:'#f59e0b', person:'#ec4899', job:'#16a34a' };
 let pollTimer = null, currentRun = null, network = null;
 
-function applyPreset(region, term) {
+function applyPreset(region, term, anchors) {
     document.getElementById('region').value = region;
     document.getElementById('term').value = term;
+    if (anchors !== undefined) document.getElementById('seeds').value = anchors;
 }
 
 async function startCrawl() {
@@ -152,6 +163,8 @@ async function startCrawl() {
         depth: parseInt(document.getElementById('depth').value),
         max_companies: parseInt(document.getElementById('max-companies').value),
         region_only: document.getElementById('region-only').checked,
+        include_anchors: document.getElementById('use-anchors').checked,
+        seeds: document.getElementById('seeds').value.trim(),
     };
     if (!body.region || !body.term) { alert('Region and term are required'); return; }
     btn.disabled = true; btn.textContent = 'Starting...';

@@ -214,6 +214,75 @@ def in_region(text: str, terms: list[str]) -> bool:
     return False
 
 
+# Flagship AI entities to seed the crawl from, per country. The crawler starts
+# at these known anchors and expands outward (their partners, spin-offs, portfolio
+# companies, alumni), rather than starting cold from generic search.
+REGION_ANCHORS = {
+    "united arab emirates": {
+        "organizations": [
+            "MBZUAI", "G42", "Technology Innovation Institute", "Presight AI",
+            "Core42", "AI71", "Inception Institute of Artificial Intelligence",
+            "Khalifa University", "EDGE Group", "Space42",
+        ],
+        "people": ["Peng Xiao", "Eric Xing", "Timothy Baldwin"],
+    },
+    "saudi arabia": {
+        "organizations": [
+            "HUMAIN", "SDAIA", "KAUST", "NEOM Tonomus", "Aramco Digital",
+            "Lucidya", "Mozn", "Allam",
+        ],
+        "people": ["Tareq Amin", "Abdullah Alghamdi"],
+    },
+    "qatar": {
+        "organizations": [
+            "Qatar Computing Research Institute", "Hamad Bin Khalifa University",
+            "Qatar Foundation", "Qatar University", "Ooredoo",
+        ],
+        "people": [],
+    },
+}
+
+# Region names that mean "the whole Gulf" — merge every country's anchors.
+_GULF_ALIASES = {"gulf", "gcc", "arab gulf", "middle east", "mena", "khaleej"}
+
+
+def _dedup(items: list[str]) -> list[str]:
+    out, seen = [], set()
+    for it in items:
+        k = re.sub(r"[^a-z0-9]+", "", (it or "").lower())
+        if k and k not in seen:
+            seen.add(k)
+            out.append(it.strip())
+    return out
+
+
+def anchor_seeds(region: str, extra: str = "") -> dict:
+    """Return {organizations:[...], people:[...]} anchor entities for a region.
+
+    `extra` is free-text (comma/newline separated) user-supplied anchors, added
+    as organizations so the user can start from their own entities/people.
+    """
+    key = (region or "").strip().lower()
+    orgs: list[str] = []
+    people: list[str] = []
+    if key in _GULF_ALIASES:
+        for a in REGION_ANCHORS.values():
+            orgs += a["organizations"]
+            people += a["people"]
+    elif key in REGION_ANCHORS:
+        orgs += REGION_ANCHORS[key]["organizations"]
+        people += REGION_ANCHORS[key]["people"]
+    else:
+        for k, a in REGION_ANCHORS.items():
+            if key and (key in k or k in key):
+                orgs += a["organizations"]
+                people += a["people"]
+    for item in re.split(r"[,\n;]", extra or ""):
+        if item.strip():
+            orgs.append(item.strip())
+    return {"organizations": _dedup(orgs), "people": _dedup(people)}
+
+
 def extract_entities(text: str, region: str, term: str) -> dict:
     """Extract {companies:[{name,location,reason}], people:[{name,role,company}]}.
 
@@ -498,14 +567,20 @@ class GraphCrawler:
     MAX_LINKS_PER_PAGE = 5
     DELAY = 0.4  # politeness between fetches
 
+    MAX_ANCHOR_ORGS = 14
+    MAX_ANCHOR_PEOPLE = 6
+
     def __init__(self, run_id: int, region: str, term: str, profile: dict,
-                 max_depth: int = 3, max_companies: int = 100, region_only: bool = True):
+                 max_depth: int = 3, max_companies: int = 100, region_only: bool = True,
+                 include_anchors: bool = True, extra_seeds: str = ""):
         self.run_id = run_id
         self.region = region
         self.term = term
         self.max_depth = max_depth
         self.max_companies = max_companies
         self.region_only = region_only
+        self.include_anchors = include_anchors
+        self.extra_seeds = extra_seeds
         self.keywords = _keyword_set(term)
         self.region_terms = region_terms(region)
         self.matcher = JobMatcher(profile)
@@ -536,6 +611,11 @@ class GraphCrawler:
             gs.add_edge(self.run_id, region_id, term_id, "affiliated")
 
             frontier: deque = deque()
+
+            # Anchor seeding: start from the region's flagship AI entities and
+            # expand outward (their ecosystem + careers) before generic search.
+            if self.include_anchors or self.extra_seeds:
+                self._seed_anchors(frontier, term_id)
 
             # Seed searches -> page tasks at depth 1
             for kind, q in seed_queries(self.region, self.term):
@@ -574,6 +654,59 @@ class GraphCrawler:
             logger.exception("Graph crawl failed")
             gs.append_log(self.run_id, f"ERROR: {e}")
             gs.update_run(self.run_id, status="failed", finished_at=_now())
+
+    def _seed_anchors(self, frontier, term_id):
+        """Seed the frontier from known flagship AI entities & people in the region."""
+        anchors = anchor_seeds(self.region, self.extra_seeds)
+        orgs = anchors["organizations"][:self.MAX_ANCHOR_ORGS]
+        people = anchors["people"][:self.MAX_ANCHOR_PEOPLE]
+        if not orgs and not people:
+            return
+        self._log(f"Anchoring from {len(orgs)} entities + {len(people)} people: "
+                  f"{', '.join(orgs[:6])}{'…' if len(orgs) > 6 else ''}")
+
+        for org in orgs:
+            key = re.sub(r"[^a-z0-9]+", "", org.lower())
+            if not key or key in self.seen_companies:
+                continue
+            cid = gs.add_node(self.run_id, "company", org, depth=0,
+                              discovered_from=term_id,
+                              meta={"summary": "Flagship AI anchor entity in the region.",
+                                    "location": self.region, "in_region": True,
+                                    "locality": "anchor", "anchor": True})
+            self.seen_companies[key] = cid
+            self.n_companies += 1
+            gs.add_edge(self.run_id, term_id, cid, "affiliated")
+            # Resolve the anchor's own open roles.
+            frontier.append(("company", org, org, 0, cid))
+            # Expand its ecosystem (partners / spin-offs / portfolio / alumni).
+            for q in (f"{org} {self.term} companies",
+                      f"{org} portfolio partners spin-off startups {self.region}"):
+                self._seed_search(q, cid, "links_to", frontier)
+            self._stats()
+
+        for person in people:
+            pnode = gs.add_node(self.run_id, "person", person, depth=0,
+                                discovered_from=term_id,
+                                meta={"anchor": True, "region": self.region})
+            self.n_people += 1
+            gs.add_edge(self.run_id, term_id, pnode, "affiliated")
+            self._seed_search(f"{person} {self.region} AI company founder",
+                              pnode, "mentions", frontier)
+            self._stats()
+
+    def _seed_search(self, query, parent_id, relation, frontier):
+        """Run a search and enqueue its results as depth-1 pages under `parent_id`."""
+        for r in search_text(query, max_results=6):
+            url = (r.get("href") or r.get("url") or "").strip()
+            title = (r.get("title") or url).strip()
+            if not url or url in self.visited_urls or self._skip_host(url):
+                continue
+            self.visited_urls.add(url)
+            pid = gs.add_node(self.run_id, "page", title, url=url, depth=1,
+                              discovered_from=parent_id)
+            gs.add_edge(self.run_id, parent_id, pid, relation)
+            frontier.append(("page", url, title, 1, pid))
 
     def _skip_host(self, url: str) -> bool:
         host = urlparse(url).netloc.lower()
