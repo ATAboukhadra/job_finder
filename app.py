@@ -804,6 +804,90 @@ def create_app():
             enabled = True
         return jsonify({"status": "ok", "enabled": enabled})
 
+    # --- Graph Search (regional opportunity crawler) ---
+
+    GRAPH_PRESETS = [
+        {"region": "United Arab Emirates", "term": "AI, computer vision"},
+        {"region": "Saudi Arabia", "term": "AI, computer vision"},
+        {"region": "Qatar", "term": "AI, computer vision"},
+    ]
+
+    @app.route("/graph")
+    def graph_page():
+        import graph_storage as gs
+        return render_template("graph.html", runs=gs.list_runs(), presets=GRAPH_PRESETS)
+
+    @app.route("/api/graph/crawl", methods=["POST"])
+    def api_graph_crawl():
+        import graph_storage as gs
+        data = request.json or {}
+        region = (data.get("region") or "").strip()
+        term = (data.get("term") or "").strip()
+        if not region or not term:
+            return jsonify({"status": "error", "error": "region and term required"}), 400
+        max_depth = max(1, min(int(data.get("depth", 3)), 4))
+        max_companies = max(1, min(int(data.get("max_companies", 100)), 300))
+
+        run_id = gs.create_run(region, term, max_depth, max_companies)
+
+        def run():
+            try:
+                from graph_search import GraphCrawler
+                profile = load_profile()
+                GraphCrawler(run_id, region, term, profile,
+                             max_depth=max_depth, max_companies=max_companies).run()
+            except Exception as e:
+                logger.error("Graph crawl thread failed: %s", e)
+                gs.update_run(run_id, status="failed")
+
+        threading.Thread(target=run, daemon=True).start()
+        return jsonify({"status": "ok", "run_id": run_id})
+
+    @app.route("/api/graph/runs")
+    def api_graph_runs():
+        import graph_storage as gs
+        return jsonify({"runs": gs.list_runs()})
+
+    @app.route("/api/graph/run/<int:run_id>")
+    def api_graph_run(run_id):
+        import graph_storage as gs
+        run = gs.get_run(run_id)
+        if not run:
+            return jsonify({"status": "error", "error": "run not found"}), 404
+        return jsonify({"status": "ok", "run": run})
+
+    @app.route("/api/graph/run/<int:run_id>/graph")
+    def api_graph_run_graph(run_id):
+        import graph_storage as gs
+        run = gs.get_run(run_id)
+        if not run:
+            return jsonify({"status": "error", "error": "run not found"}), 404
+        return jsonify({"status": "ok", "run": run, **gs.get_graph(run_id)})
+
+    @app.route("/api/graph/push-job", methods=["POST"])
+    def api_graph_push_job():
+        """Bridge a discovered graph job into the main jobs.db / pipeline."""
+        import graph_storage as gs
+        data = request.json or {}
+        job_id = data.get("job_id")
+        if not job_id:
+            return jsonify({"status": "error", "error": "job_id required"}), 400
+        gj = gs.get_job(int(job_id))
+        if not gj:
+            return jsonify({"status": "error", "error": "job not found"}), 404
+
+        job = Job(
+            title=gj["title"], company=gj["company"], location=gj.get("location", ""),
+            url=gj["url"], board=JobBoard.INTERNET, description=gj.get("description", ""),
+        )
+        profile = load_profile()
+        matcher = JobMatcher(profile)
+        ranked = matcher.rank([job])
+        save_jobs(ranked if ranked else [job])
+        gs.mark_job_pushed(int(job_id))
+        score = (ranked[0].match_score if ranked else 0) or 0
+        return jsonify({"status": "ok", "match_score": round(score, 3)})
+
     @app.route("/api/form-answers/<path:url>")
     def api_form_answers(url):
         """Get pre-generated form answers for a job."""

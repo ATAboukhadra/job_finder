@@ -1,0 +1,269 @@
+{% extends "base.html" %}
+{% block title %}Graph Search{% endblock %}
+
+{% block content %}
+<style>
+    .graph-hero { margin-bottom: 1rem; }
+    .preset-row { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 0.5rem 0 1rem; }
+    .preset-chip { cursor: pointer; padding: 0.35rem 0.7rem; border-radius: 16px; font-size: 0.85rem;
+                   background: #eef2ff; border: 1px solid #c7d2fe; color: #3730a3; }
+    .preset-chip:hover { background: #e0e7ff; }
+    .crawl-form { display: grid; grid-template-columns: 1.4fr 1.6fr 1fr 1fr auto; gap: 0.6rem; align-items: end; }
+    .crawl-form label { font-size: 0.8rem; opacity: 0.7; }
+    .crawl-form input { margin-bottom: 0; }
+    @media (max-width: 900px) { .crawl-form { grid-template-columns: 1fr 1fr; } }
+    #graph-canvas { height: 480px; border: 1px solid #e0e0e0; border-radius: 8px; background: #fff; }
+    .run-stats { display: flex; gap: 1rem; flex-wrap: wrap; margin: 0.6rem 0; }
+    .run-stat { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 0.5rem 0.9rem; text-align: center; min-width: 90px; }
+    .run-stat .v { font-size: 1.4rem; font-weight: 700; color: var(--pico-primary); }
+    .run-stat .l { font-size: 0.72rem; opacity: 0.6; }
+    #crawl-log { height: 150px; overflow-y: auto; background: #0b1021; color: #a5f3fc; font-family: monospace;
+                 font-size: 0.75rem; padding: 0.6rem; border-radius: 8px; white-space: pre-wrap; }
+    .status-pill { display: inline-block; padding: 0.15rem 0.55rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }
+    .status-running { background: #dbeafe; color: #1e40af; }
+    .status-completed { background: #dcfce7; color: #16a34a; }
+    .status-failed { background: #fee2e2; color: #991b1b; }
+    .tbl { width: 100%; font-size: 0.85rem; }
+    .tbl th { text-align: left; opacity: 0.6; font-weight: 600; }
+    .tbl td { padding: 0.35rem 0.4rem; border-bottom: 1px solid #eee; vertical-align: top; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1.4fr; gap: 1rem; }
+    @media (max-width: 1000px) { .grid-2 { grid-template-columns: 1fr; } }
+    .legend { display: flex; gap: 0.8rem; flex-wrap: wrap; font-size: 0.75rem; margin: 0.4rem 0; }
+    .legend span::before { content: '\25CF'; margin-right: 0.25rem; }
+    .btn-sm { padding: 0.2rem 0.5rem; font-size: 0.78rem; margin: 0; }
+</style>
+
+<div class="graph-hero">
+    <h2 style="margin-bottom:0.2rem;">🕸️ Graph Search</h2>
+    <p style="opacity:0.7;margin-top:0;">Crawl a region for a term — discover affiliated companies, people, and open roles by indexing news & the open web.</p>
+</div>
+
+<div class="settings-panel">
+    <div class="preset-row">
+        <strong style="align-self:center;font-size:0.85rem;opacity:0.7;">Presets:</strong>
+        {% for p in presets %}
+        <span class="preset-chip" onclick="applyPreset('{{ p.region }}', '{{ p.term }}')">{{ p.region }} · {{ p.term }}</span>
+        {% endfor %}
+    </div>
+    <div class="crawl-form">
+        <div>
+            <label>Region</label>
+            <input type="text" id="region" placeholder="e.g. United Arab Emirates" value="{{ presets[0].region }}">
+        </div>
+        <div>
+            <label>Term</label>
+            <input type="text" id="term" placeholder="e.g. AI, computer vision" value="{{ presets[0].term }}">
+        </div>
+        <div>
+            <label>Depth: <span id="depth-val">3</span></label>
+            <input type="range" id="depth" min="1" max="4" value="3" oninput="document.getElementById('depth-val').textContent=this.value">
+        </div>
+        <div>
+            <label>Max companies</label>
+            <input type="number" id="max-companies" value="100" min="5" max="300">
+        </div>
+        <div>
+            <button id="start-btn" onclick="startCrawl()">Start crawl</button>
+        </div>
+    </div>
+</div>
+
+<div id="run-area" style="display:none;">
+    <p>
+        Run <strong id="run-id-label"></strong>
+        <span id="run-status" class="status-pill"></span>
+    </p>
+    <div class="run-stats">
+        <div class="run-stat"><div class="v" id="s-pages">0</div><div class="l">pages</div></div>
+        <div class="run-stat"><div class="v" id="s-companies">0</div><div class="l">companies</div></div>
+        <div class="run-stat"><div class="v" id="s-people">0</div><div class="l">people</div></div>
+        <div class="run-stat"><div class="v" id="s-jobs">0</div><div class="l">jobs</div></div>
+    </div>
+    <div class="legend">
+        <span style="color:#7c3aed;">term</span>
+        <span style="color:#0ea5e9;">page</span>
+        <span style="color:#f59e0b;">company</span>
+        <span style="color:#ec4899;">person</span>
+        <span style="color:#16a34a;">job</span>
+    </div>
+    <div class="grid-2">
+        <div>
+            <div id="crawl-log"></div>
+        </div>
+        <div>
+            <div id="graph-canvas"></div>
+        </div>
+    </div>
+
+    <div class="grid-2" style="margin-top:1rem;">
+        <div class="settings-panel">
+            <strong>Companies (<span id="co-count">0</span>)</strong>
+            <table class="tbl"><tbody id="companies-tbody"></tbody></table>
+        </div>
+        <div class="settings-panel">
+            <strong>Discovered jobs (<span id="job-count">0</span>)</strong>
+            <table class="tbl">
+                <thead><tr><th>Title</th><th>Company</th><th>Score</th><th></th></tr></thead>
+                <tbody id="jobs-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+{% if runs %}
+<div class="settings-panel" style="margin-top:1rem;">
+    <strong>Recent runs</strong>
+    <table class="tbl">
+        <thead><tr><th>#</th><th>Region</th><th>Term</th><th>Status</th><th>Started</th></tr></thead>
+        <tbody>
+        {% for r in runs %}
+            <tr style="cursor:pointer;" onclick="openRun({{ r.id }})">
+                <td>{{ r.id }}</td><td>{{ r.region }}</td><td>{{ r.term }}</td>
+                <td><span class="status-pill status-{{ r.status }}">{{ r.status }}</span></td>
+                <td>{{ (r.started_at or '')[:19].replace('T',' ') }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+<script>
+const NODE_COLORS = { term:'#7c3aed', region:'#4b5563', page:'#0ea5e9', company:'#f59e0b', person:'#ec4899', job:'#16a34a' };
+let pollTimer = null, currentRun = null, network = null;
+
+function applyPreset(region, term) {
+    document.getElementById('region').value = region;
+    document.getElementById('term').value = term;
+}
+
+async function startCrawl() {
+    const btn = document.getElementById('start-btn');
+    const body = {
+        region: document.getElementById('region').value.trim(),
+        term: document.getElementById('term').value.trim(),
+        depth: parseInt(document.getElementById('depth').value),
+        max_companies: parseInt(document.getElementById('max-companies').value),
+    };
+    if (!body.region || !body.term) { alert('Region and term are required'); return; }
+    btn.disabled = true; btn.textContent = 'Starting...';
+    try {
+        const resp = await fetch('/api/graph/crawl', {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (data.status === 'ok') { openRun(data.run_id); }
+        else { alert('Error: ' + (data.error || 'unknown')); }
+    } catch (e) { alert('Error: ' + e.message); }
+    finally { btn.disabled = false; btn.textContent = 'Start crawl'; }
+}
+
+function openRun(runId) {
+    currentRun = runId;
+    document.getElementById('run-area').style.display = 'block';
+    document.getElementById('run-id-label').textContent = '#' + runId;
+    if (pollTimer) clearInterval(pollTimer);
+    poll();
+    pollTimer = setInterval(poll, 2500);
+    document.getElementById('run-area').scrollIntoView({behavior: 'smooth'});
+}
+
+async function poll() {
+    if (!currentRun) return;
+    try {
+        const resp = await fetch(`/api/graph/run/${currentRun}/graph`);
+        const data = await resp.json();
+        if (data.status !== 'ok') return;
+        renderRun(data);
+        if (data.run.status !== 'running' && pollTimer) {
+            clearInterval(pollTimer); pollTimer = null;
+        }
+    } catch (e) { /* transient */ }
+}
+
+function renderRun(data) {
+    const run = data.run;
+    const stats = JSON.parse(run.stats_json || '{}');
+    document.getElementById('s-pages').textContent = stats.pages || 0;
+    document.getElementById('s-companies').textContent = stats.companies || 0;
+    document.getElementById('s-people').textContent = stats.people || 0;
+    document.getElementById('s-jobs').textContent = stats.jobs || 0;
+    const sp = document.getElementById('run-status');
+    sp.textContent = run.status;
+    sp.className = 'status-pill status-' + run.status;
+
+    const log = document.getElementById('crawl-log');
+    log.textContent = run.log || '';
+    log.scrollTop = log.scrollHeight;
+
+    renderGraph(data.nodes, data.edges);
+    renderCompanies(data.companies);
+    renderJobs(data.jobs);
+}
+
+function renderGraph(nodes, edges) {
+    const visNodes = nodes.map(n => ({
+        id: n.id,
+        label: n.name.length > 28 ? n.name.slice(0, 27) + '…' : n.name,
+        title: n.name + (n.url ? '\n' + n.url : ''),
+        color: NODE_COLORS[n.node_type] || '#9ca3af',
+        shape: n.node_type === 'company' ? 'box' : (n.node_type === 'job' ? 'diamond' : 'dot'),
+        size: n.node_type === 'term' ? 26 : (n.node_type === 'company' ? 18 : 12),
+    }));
+    const visEdges = edges.map(e => ({ from: e.source_id, to: e.target_id, label: e.relation,
+        font: {size: 8, color: '#9ca3af'}, color: {color: '#d1d5db'}, arrows: 'to' }));
+    const container = document.getElementById('graph-canvas');
+    const dataset = { nodes: visNodes, edges: visEdges };
+    if (!network) {
+        network = new vis.Network(container, dataset, {
+            physics: { stabilization: true, barnesHut: { gravitationalConstant: -8000, springLength: 120 } },
+            interaction: { hover: true },
+            nodes: { font: { size: 11 } },
+        });
+    } else {
+        network.setData(dataset);
+    }
+}
+
+function renderCompanies(companies) {
+    document.getElementById('co-count').textContent = companies.length;
+    document.getElementById('companies-tbody').innerHTML = companies.map(c => `
+        <tr><td>${c.url ? `<a href="${c.url}" target="_blank">${esc(c.name)}</a>` : esc(c.name)}</td>
+        <td style="text-align:right;">${c.job_count} role${c.job_count === 1 ? '' : 's'}</td></tr>
+    `).join('') || '<tr><td>No companies yet…</td></tr>';
+}
+
+function renderJobs(jobs) {
+    document.getElementById('job-count').textContent = jobs.length;
+    document.getElementById('jobs-tbody').innerHTML = jobs.map(j => `
+        <tr>
+            <td><a href="${j.url}" target="_blank">${esc(j.title)}</a>
+                <div style="opacity:0.5;font-size:0.72rem;">${esc(j.location || '')} · ${esc(j.source || '')}</div></td>
+            <td>${esc(j.company)}</td>
+            <td>${Math.round((j.match_score || 0) * 100)}%</td>
+            <td>${j.pushed
+                ? '<span class="applied-badge">sent ✓</span>'
+                : `<button class="btn-sm" onclick="pushJob(${j.id}, this)">→ Pipeline</button>`}</td>
+        </tr>
+    `).join('') || '<tr><td>No jobs yet…</td></tr>';
+}
+
+async function pushJob(jobId, btn) {
+    btn.disabled = true; btn.textContent = '…';
+    try {
+        const resp = await fetch('/api/graph/push-job', {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({job_id: jobId}),
+        });
+        const data = await resp.json();
+        if (data.status === 'ok') {
+            btn.outerHTML = '<span class="applied-badge">sent ✓</span>';
+        } else { alert('Error: ' + (data.error || 'unknown')); btn.disabled = false; btn.textContent = '→ Pipeline'; }
+    } catch (e) { alert('Error: ' + e.message); btn.disabled = false; btn.textContent = '→ Pipeline'; }
+}
+
+function esc(s) { return (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+</script>
+{% endblock %}
