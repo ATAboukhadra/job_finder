@@ -59,6 +59,18 @@ def get_graph_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
         )
     """)
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS graph_evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER,
+            company_node_id INTEGER,
+            source_url TEXT DEFAULT '',
+            source_title TEXT DEFAULT '',
+            snippet TEXT DEFAULT '',
+            created_at TEXT,
+            UNIQUE(company_node_id, source_url)
+        )
+    """)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS graph_jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             run_id INTEGER,
@@ -167,6 +179,18 @@ def add_node(run_id: int, node_type: str, name: str, url: str = "",
     return row["id"] if row else -1
 
 
+def update_node_meta(node_id: int, meta: dict, db_path: Path = DB_PATH):
+    """Merge `meta` into a node's existing meta_json."""
+    conn = get_graph_db(db_path)
+    row = conn.execute("SELECT meta_json FROM graph_nodes WHERE id = ?", (node_id,)).fetchone()
+    current = json.loads(row["meta_json"]) if row and row["meta_json"] else {}
+    current.update(meta)
+    conn.execute("UPDATE graph_nodes SET meta_json = ? WHERE id = ?",
+                 (json.dumps(current), node_id))
+    conn.commit()
+    conn.close()
+
+
 def add_edge(run_id: int, source_id: int, target_id: int, relation: str,
              db_path: Path = DB_PATH):
     if source_id < 0 or target_id < 0 or source_id == target_id:
@@ -176,6 +200,23 @@ def add_edge(run_id: int, source_id: int, target_id: int, relation: str,
         """INSERT OR IGNORE INTO graph_edges (run_id, source_id, target_id, relation)
            VALUES (?, ?, ?, ?)""",
         (run_id, source_id, target_id, relation),
+    )
+    conn.commit()
+    conn.close()
+
+
+def add_evidence(run_id: int, company_node_id: int, source_url: str,
+                 source_title: str, snippet: str, db_path: Path = DB_PATH):
+    """Record where/how a company was found (one row per source page)."""
+    if not snippet:
+        return
+    conn = get_graph_db(db_path)
+    conn.execute(
+        """INSERT OR IGNORE INTO graph_evidence
+           (run_id, company_node_id, source_url, source_title, snippet, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (run_id, company_node_id, source_url, source_title, snippet[:600],
+         datetime.now().isoformat()),
     )
     conn.commit()
     conn.close()
@@ -253,9 +294,23 @@ def get_graph(run_id: int, db_path: Path = DB_PATH) -> Dict:
            ORDER BY job_count DESC, n.name ASC""",
         (run_id,),
     ).fetchall()]
+    ev_rows = [dict(r) for r in conn.execute(
+        """SELECT company_node_id, source_url, source_title, snippet
+           FROM graph_evidence WHERE run_id = ? ORDER BY id ASC""",
+        (run_id,),
+    ).fetchall()]
     conn.close()
+
+    evidence: Dict[int, list] = {}
+    for e in ev_rows:
+        evidence.setdefault(e["company_node_id"], []).append({
+            "source_url": e["source_url"], "source_title": e["source_title"],
+            "snippet": e["snippet"],
+        })
+
     for n in nodes:
         n["meta"] = json.loads(n.pop("meta_json", "{}") or "{}")
     for c in companies:
         c["meta"] = json.loads(c.pop("meta_json", "{}") or "{}")
+        c["evidence"] = evidence.get(c["id"], [])[:6]
     return {"nodes": nodes, "edges": edges, "companies": companies, "jobs": jobs}

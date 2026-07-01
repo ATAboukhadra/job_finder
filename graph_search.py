@@ -92,13 +92,18 @@ def search_news(query: str, max_results: int = 10) -> list[dict]:
 
 
 def seed_queries(region: str, term: str) -> list[tuple[str, str]]:
-    """Return (kind, query) seed searches for a region + term."""
+    """Return (kind, query) seed searches biased toward companies BASED IN the region.
+
+    Directory/listing-style queries ("companies based in X", "list of X startups")
+    surface in-country companies directly; news is kept secondary and location-gated
+    downstream so foreign vendors merely mentioned get filtered out.
+    """
     return [
-        ("web", f"{term} companies in {region}"),
-        ("web", f"{region} {term} startups"),
-        ("web", f"leading {term} companies {region}"),
-        ("news", f"{term} {region}"),
-        ("news", f"{region} artificial intelligence funding"),
+        ("web", f"list of {term} companies based in {region}"),
+        ("web", f"{term} startups headquartered in {region}"),
+        ("web", f"{term} companies directory {region}"),
+        ("web", f"local {term} companies {region} careers"),
+        ("news", f"{region} homegrown {term} startup"),
     ]
 
 
@@ -154,8 +159,63 @@ def _keyword_set(term: str) -> list[str]:
     return out or [term.lower()]
 
 
+# --- Region grounding ---------------------------------------------------
+
+# Country -> location tokens (country names, demonyms, major cities/hubs) used
+# to decide whether a company / job actually sits inside the searched country.
+REGION_ALIASES = {
+    "united arab emirates": [
+        "united arab emirates", "uae", "u.a.e", "emirati", "emirates",
+        "dubai", "abu dhabi", "sharjah", "ajman", "ras al khaimah",
+        "fujairah", "umm al quwain", "al ain", "internet city", "difc",
+    ],
+    "saudi arabia": [
+        "saudi arabia", "saudi", "ksa", "riyadh", "jeddah", "dammam",
+        "mecca", "makkah", "medina", "neom", "dhahran", "khobar", "jubail",
+    ],
+    "qatar": [
+        "qatar", "qatari", "doha", "lusail", "al rayyan", "al wakrah",
+        "education city", "west bay",
+    ],
+    "egypt": ["egypt", "egyptian", "cairo", "giza", "alexandria", "new capital"],
+    "kuwait": ["kuwait", "kuwaiti", "kuwait city"],
+    "bahrain": ["bahrain", "bahraini", "manama"],
+    "oman": ["oman", "omani", "muscat"],
+}
+
+
+def region_terms(region: str) -> list[str]:
+    """Location tokens that indicate presence inside `region`."""
+    key = (region or "").strip().lower()
+    terms: set[str] = set()
+    if key in REGION_ALIASES:
+        terms.update(REGION_ALIASES[key])
+    else:
+        for k, aliases in REGION_ALIASES.items():
+            if key and (key in k or k in key or key in aliases):
+                terms.update(aliases)
+    terms.add(key)
+    for tok in re.split(r"[,/]", key):
+        tok = tok.strip()
+        if len(tok) >= 3:
+            terms.add(tok)
+    return [t for t in terms if len(t) >= 2]
+
+
+def in_region(text: str, terms: list[str]) -> bool:
+    """True if any region token appears as a whole word in `text`."""
+    if not text:
+        return False
+    low = f" {text.lower()} "
+    for t in terms:
+        # Word-ish boundary so 'oman' doesn't match 'Romania', 'uae' doesn't match 'nuance'
+        if re.search(rf"(?<![a-z]){re.escape(t)}(?![a-z])", low):
+            return True
+    return False
+
+
 def extract_entities(text: str, region: str, term: str) -> dict:
-    """Extract {companies:[{name,reason}], people:[{name,role,company}]} from page text.
+    """Extract {companies:[{name,location,reason}], people:[{name,role,company}]}.
 
     Uses the local LLM when Ollama is available, else a regex heuristic.
     """
@@ -174,14 +234,19 @@ def extract_entities(text: str, region: str, term: str) -> dict:
 def _extract_llm(text: str, region: str, term: str) -> dict:
     system = (
         "You extract organizations and notable people from text. "
-        "Only return real, specific company/organization names and person names "
-        "that actually appear in the text."
+        "Only return real, specific names that actually appear in the text. "
+        "Never invent names."
     )
     prompt = (
-        f"From the text below, list companies/organizations working on or associated "
-        f"with '{term}' in or near {region}, and any notable people mentioned "
-        f"(founders, executives, researchers).\n\n"
-        f'Return JSON: {{"companies": [{{"name": "...", "reason": "..."}}], '
+        f"From the text below, list ONLY companies/organizations that are actually "
+        f"BASED IN {region} — i.e. headquartered there or running a physical office / "
+        f"R&D lab there — and that work on '{term}'.\n"
+        f"STRICTLY EXCLUDE foreign vendors, consultancies, or global tech firms that "
+        f"are merely mentioned, quoted, or hired to do work — unless they clearly have "
+        f"their own office located in {region}.\n"
+        f"For each company give its city/country location as stated or implied.\n"
+        f"Also list notable people based in {region} (founders, executives, researchers).\n\n"
+        f'Return JSON: {{"companies": [{{"name": "...", "location": "...", "reason": "..."}}], '
         f'"people": [{{"name": "...", "role": "...", "company": "..."}}]}}\n\n'
         f"TEXT:\n{text}"
     )
@@ -189,9 +254,16 @@ def _extract_llm(text: str, region: str, term: str) -> dict:
                                    max_tokens=1200)
     companies, people = [], []
     for c in (data.get("companies") or [])[:15]:
-        name = (c.get("name") or "").strip() if isinstance(c, dict) else str(c).strip()
-        if _valid_company(name):
-            companies.append({"name": name, "reason": (c.get("reason") or "") if isinstance(c, dict) else ""})
+        if isinstance(c, dict):
+            name = (c.get("name") or "").strip()
+            companies.append({
+                "name": name,
+                "location": (c.get("location") or "").strip(),
+                "reason": (c.get("reason") or "").strip(),
+            })
+        else:
+            companies.append({"name": str(c).strip(), "location": "", "reason": ""})
+    companies = [c for c in companies if _valid_company(c["name"])]
     for p in (data.get("people") or [])[:10]:
         if isinstance(p, dict):
             name = (p.get("name") or "").strip()
@@ -221,10 +293,27 @@ def _extract_regex(text: str) -> dict:
         key = name.lower()
         if _valid_company(name) and key not in seen:
             seen.add(key)
-            found.append({"name": name, "reason": "pattern match"})
+            found.append({"name": name, "location": "", "reason": "pattern match"})
         if len(found) >= 12:
             break
     return {"companies": found, "people": []}
+
+
+def context_snippet(text: str, name: str, window: int = 240) -> str:
+    """Return a ~window-char excerpt of `text` around the first mention of `name`."""
+    if not text or not name:
+        return ""
+    idx = text.lower().find(name.lower())
+    if idx == -1:
+        # Try the first significant word of the name (handles paraphrased mentions).
+        first = next((w for w in name.split() if len(w) > 3), "")
+        idx = text.lower().find(first.lower()) if first else -1
+        if idx == -1:
+            return ""
+    start = max(0, idx - window // 2)
+    end = min(len(text), idx + len(name) + window // 2)
+    excerpt = text[start:end].strip()
+    return ("…" if start > 0 else "") + excerpt + ("…" if end < len(text) else "")
 
 
 def _valid_company(name: str) -> bool:
@@ -410,17 +499,19 @@ class GraphCrawler:
     DELAY = 0.4  # politeness between fetches
 
     def __init__(self, run_id: int, region: str, term: str, profile: dict,
-                 max_depth: int = 3, max_companies: int = 100):
+                 max_depth: int = 3, max_companies: int = 100, region_only: bool = True):
         self.run_id = run_id
         self.region = region
         self.term = term
         self.max_depth = max_depth
         self.max_companies = max_companies
+        self.region_only = region_only
         self.keywords = _keyword_set(term)
+        self.region_terms = region_terms(region)
         self.matcher = JobMatcher(profile)
 
         self.visited_urls: set[str] = set()
-        self.seen_companies: set[str] = set()
+        self.seen_companies: dict[str, int] = {}  # normalized name -> company node id
         self.pages_fetched = 0
         self.n_companies = 0
         self.n_people = 0
@@ -498,7 +589,7 @@ class GraphCrawler:
 
         ents = extract_entities(page.get("text", ""), self.region, self.term)
         for c in ents.get("companies", []):
-            self._add_company(c.get("name", ""), c.get("reason", ""), depth, node_id, frontier)
+            self._record_company(c, depth, node_id, name, url, page.get("text", ""), frontier)
         for p in ents.get("people", []):
             self._add_person(p, node_id)
 
@@ -520,21 +611,42 @@ class GraphCrawler:
                 frontier.append(("page", link, link, depth + 1, child))
                 followed += 1
 
-    def _add_company(self, name, reason, depth, page_node_id, frontier):
-        name = (name or "").strip()
+    def _record_company(self, c, depth, page_node_id, page_title, page_url, page_text, frontier):
+        """Register a company mention: create/reuse its node, link the source page,
+        and store the context snippet ('what was said') as evidence."""
+        name = (c.get("name") or "").strip()
+        reason = (c.get("reason") or "").strip()
+        location = (c.get("location") or "").strip()
         key = re.sub(r"[^a-z0-9]+", "", name.lower())
-        if not name or not key or key in self.seen_companies:
-            # Still connect the page to an already-known company
+        if not name or not key:
             return
-        if self.n_companies >= self.max_companies:
-            return
-        self.seen_companies.add(key)
-        self.n_companies += 1
-        cid = gs.add_node(self.run_id, "company", name, depth=depth,
-                          discovered_from=page_node_id, meta={"reason": reason})
+
+        cid = self.seen_companies.get(key)
+        if cid is None:
+            if self.n_companies >= self.max_companies:
+                return
+            # Region gate: drop companies whose stated location is clearly outside
+            # the searched country (foreign vendors merely mentioned). Companies with
+            # no explicit location are kept (seed pages are locality-scoped) but
+            # flagged unverified until an in-country role confirms them.
+            verified = in_region(location, self.region_terms)
+            if self.region_only and location and not verified:
+                logger.debug("skip out-of-region company %s (%s)", name, location)
+                return
+            cid = gs.add_node(self.run_id, "company", name, depth=depth,
+                              discovered_from=page_node_id,
+                              meta={"summary": reason, "location": location,
+                                    "in_region": verified,
+                                    "locality": "verified" if verified else "unknown"})
+            self.seen_companies[key] = cid
+            self.n_companies += 1
+            self._log(f"  + company: {name}" + (f" ({location})" if location else ""))
+            frontier.append(("company", name, name, depth, cid))
+
         gs.add_edge(self.run_id, page_node_id, cid, "mentions")
-        self._log(f"  + company: {name}")
-        frontier.append(("company", name, name, depth, cid))
+        # Evidence = the sentence(s) around the mention, falling back to the LLM reason.
+        snippet = context_snippet(page_text, name) or reason
+        gs.add_evidence(self.run_id, cid, page_url, page_title, snippet)
 
     def _add_person(self, person: dict, page_node_id):
         name = (person.get("name") or "").strip()
@@ -555,24 +667,44 @@ class GraphCrawler:
             return
         if not jobs:
             return
+
+        added = 0
         for j in jobs:
+            loc = j.get("location", "")
+            desc = j.get("description", "")
+            # Only keep positions physically located inside the searched country.
+            if self.region_only and not self._job_in_region(loc, desc):
+                continue
             title = j.get("title") or self.term.title()
             url = j.get("url")
             if not url:
                 continue
-            score = self._score(title, company, j.get("location", ""), j.get("description", ""), url)
+            score = self._score(title, company, loc, desc, url)
             job_id = gs.add_job(
                 self.run_id, company_node_id, title, company,
-                j.get("location", ""), url, j.get("description", "")[:4000],
-                j.get("source", ""), score,
+                loc, url, desc[:4000], j.get("source", ""), score,
             )
             if job_id > 0:
                 self.n_jobs += 1
+                added += 1
                 jnode = gs.add_node(self.run_id, "job", title, url=url, depth=0,
                                     discovered_from=company_node_id,
                                     meta={"score": round(score, 3), "graph_job_id": job_id})
                 gs.add_edge(self.run_id, company_node_id, jnode, "hiring")
-        self._log(f"  {company}: {len(jobs)} roles")
+
+        if added:
+            # An in-country opening confirms this company operates in the region.
+            gs.update_node_meta(company_node_id, {"in_region": True, "locality": "jobs"})
+            self._log(f"  {company}: {added} in-country role(s)")
+
+    def _job_in_region(self, location: str, description: str) -> bool:
+        if in_region(location, self.region_terms):
+            return True
+        # Generic careers-page links often carry no structured location; fall back
+        # to the surrounding page text snippet.
+        if not location and in_region(description, self.region_terms):
+            return True
+        return False
 
     def _score(self, title, company, location, description, url) -> float:
         try:

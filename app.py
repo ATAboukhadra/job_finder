@@ -827,6 +827,7 @@ def create_app():
             return jsonify({"status": "error", "error": "region and term required"}), 400
         max_depth = max(1, min(int(data.get("depth", 3)), 4))
         max_companies = max(1, min(int(data.get("max_companies", 100)), 300))
+        region_only = bool(data.get("region_only", True))
 
         run_id = gs.create_run(region, term, max_depth, max_companies)
 
@@ -835,7 +836,8 @@ def create_app():
                 from graph_search import GraphCrawler
                 profile = load_profile()
                 GraphCrawler(run_id, region, term, profile,
-                             max_depth=max_depth, max_companies=max_companies).run()
+                             max_depth=max_depth, max_companies=max_companies,
+                             region_only=region_only).run()
             except Exception as e:
                 logger.error("Graph crawl thread failed: %s", e)
                 gs.update_run(run_id, status="failed")

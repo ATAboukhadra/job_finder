@@ -66,6 +66,10 @@
             <button id="start-btn" onclick="startCrawl()">Start crawl</button>
         </div>
     </div>
+    <label style="display:flex;align-items:center;gap:0.4rem;margin-top:0.6rem;font-size:0.85rem;">
+        <input type="checkbox" id="region-only" checked style="margin:0;">
+        Only companies &amp; positions located in the country (recommended)
+    </label>
 </div>
 
 <div id="run-area" style="display:none;">
@@ -147,6 +151,7 @@ async function startCrawl() {
         term: document.getElementById('term').value.trim(),
         depth: parseInt(document.getElementById('depth').value),
         max_companies: parseInt(document.getElementById('max-companies').value),
+        region_only: document.getElementById('region-only').checked,
     };
     if (!body.region || !body.term) { alert('Region and term are required'); return; }
     btn.disabled = true; btn.textContent = 'Starting...';
@@ -230,10 +235,35 @@ function renderGraph(nodes, edges) {
 
 function renderCompanies(companies) {
     document.getElementById('co-count').textContent = companies.length;
-    document.getElementById('companies-tbody').innerHTML = companies.map(c => `
-        <tr><td>${c.url ? `<a href="${c.url}" target="_blank">${esc(c.name)}</a>` : esc(c.name)}</td>
-        <td style="text-align:right;">${c.job_count} role${c.job_count === 1 ? '' : 's'}</td></tr>
-    `).join('') || '<tr><td>No companies yet…</td></tr>';
+    document.getElementById('companies-tbody').innerHTML = companies.map((c, i) => {
+        const meta = c.meta || {};
+        const loc = meta.location || '';
+        const badge = meta.in_region ? ' <span class="remote-badge" style="background:#dcfce7;color:#16a34a;">in&nbsp;region</span>' : '';
+        const ev = c.evidence || [];
+        const hasDetail = (meta.summary || ev.length);
+        const summary = meta.summary
+            ? `<div style="margin:0.3rem 0;"><strong>Summary:</strong> ${esc(meta.summary)}</div>` : '';
+        const evHtml = ev.map(e => `
+            <div style="margin:0.4rem 0;padding-left:0.6rem;border-left:2px solid #c7d2fe;">
+                <div style="font-size:0.82rem;">“${esc(e.snippet)}”</div>
+                <div style="font-size:0.72rem;opacity:0.6;">— <a href="${esc(e.source_url)}" target="_blank">${esc(e.source_title || e.source_url)}</a></div>
+            </div>`).join('');
+        const detail = hasDetail ? `
+            <tr id="co-detail-${i}" style="display:none;"><td colspan="2" style="background:#f9fafb;">
+                ${summary}
+                ${ev.length ? '<div style="font-size:0.75rem;opacity:0.6;margin-top:0.3rem;">Where it was found / what was said:</div>' + evHtml : ''}
+            </td></tr>` : '';
+        const caret = hasDetail ? `<span style="cursor:pointer;opacity:0.5;" onclick="toggleCo(${i})">▸</span> ` : '';
+        return `<tr>
+            <td>${caret}${c.url ? `<a href="${c.url}" target="_blank">${esc(c.name)}</a>` : esc(c.name)}${badge}
+                ${loc ? `<div style="opacity:0.5;font-size:0.72rem;">${esc(loc)}</div>` : ''}</td>
+            <td style="text-align:right;">${c.job_count} role${c.job_count === 1 ? '' : 's'}</td></tr>${detail}`;
+    }).join('') || '<tr><td>No companies yet…</td></tr>';
+}
+
+function toggleCo(i) {
+    const row = document.getElementById('co-detail-' + i);
+    if (row) row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
 }
 
 function renderJobs(jobs) {
