@@ -245,6 +245,31 @@ REGION_ANCHORS = {
 # Region names that mean "the whole Gulf" — merge every country's anchors.
 _GULF_ALIASES = {"gulf", "gcc", "arab gulf", "middle east", "mena", "khaleej"}
 
+# Verified direct careers pages for flagship anchors whose domains are acronyms
+# (so name→host matching can't find them) or who run bespoke/JS portals. Keyed by
+# normalized name. Used to link straight to the right page and avoid aggregators.
+ANCHOR_CAREERS = {
+    "g42": "https://careers.g42.ai/global/en",
+    "technologyinnovationinstitute": "https://careers.tii.ae/",
+    "tii": "https://careers.tii.ae/",
+    "mbzuai": "https://careers.mbzuai.ac.ae/",
+}
+
+
+def _norm_name(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+
+def _host_matches_company(host: str, company: str) -> bool:
+    """True if a careers-page host plausibly belongs to the company (not an aggregator)."""
+    host = (host or "").lower()
+    # Significant name tokens (drop generic corporate words).
+    stop = {"ai", "the", "group", "inc", "llc", "ltd", "technology", "technologies",
+            "innovation", "institute", "company", "labs", "systems", "solutions"}
+    tokens = [t for t in re.split(r"[^a-z0-9]+", company.lower())
+              if len(t) > 2 and t not in stop]
+    return any(t in host for t in tokens)
+
 
 def _dedup(items: list[str]) -> list[str]:
     out, seen = [], set()
@@ -465,6 +490,139 @@ def fetch_ashby(slug: str, keywords: list[str], limit: int = 15) -> list[dict]:
     ], keywords, limit)
 
 
+def fetch_smartrecruiters(slug: str, keywords: list[str], limit: int = 25) -> list[dict]:
+    """SmartRecruiters public postings API (used by many large enterprises)."""
+    try:
+        r = requests.get(
+            f"https://api.smartrecruiters.com/v1/companies/{slug}/postings",
+            params={"limit": 100}, headers=_HEADERS, timeout=12)
+        r.raise_for_status()
+        items = r.json().get("content", [])
+    except Exception:
+        return []
+    out = []
+    for it in items:
+        loc = it.get("location") or {}
+        locstr = ", ".join(x for x in (loc.get("city"), loc.get("region"),
+                                       loc.get("country")) if x)
+        pid = it.get("id") or it.get("uuid")
+        out.append({
+            "title": it.get("name", ""),
+            "location": locstr,
+            "url": (it.get("applyUrl")
+                    or (f"https://jobs.smartrecruiters.com/{slug}/{pid}" if pid else "")),
+            "description": "",  # not in list payload; title is enough for matching
+            "source": "smartrecruiters",
+        })
+    return _filter_jobs(out, keywords, limit)
+
+
+def fetch_recruitee(slug: str, keywords: list[str], limit: int = 25) -> list[dict]:
+    """Recruitee public offers API ({slug}.recruitee.com)."""
+    try:
+        r = requests.get(f"https://{slug}.recruitee.com/api/offers/",
+                         headers=_HEADERS, timeout=12)
+        r.raise_for_status()
+        offers = r.json().get("offers", [])
+    except Exception:
+        return []
+    out = []
+    for o in offers:
+        locstr = ", ".join(x for x in (o.get("city"), o.get("country")) if x) or o.get("location", "")
+        out.append({
+            "title": o.get("title", ""),
+            "location": locstr,
+            "url": o.get("careers_url") or o.get("url", ""),
+            "description": re.sub(r"<[^>]+>", " ", o.get("description", "") or ""),
+            "source": "recruitee",
+        })
+    return _filter_jobs(out, keywords, limit)
+
+
+# ATS signatures we can auto-detect inside a company's own careers page, mapped
+# to (fetcher, slug-extraction). Covers the platforms big Gulf orgs actually use.
+_ATS_SIGNATURES = [
+    ("greenhouse", re.compile(r"(?:boards|job-boards)\.greenhouse\.io/(?:embed/job_board\?for=)?([a-zA-Z0-9_-]+)"), fetch_greenhouse),
+    ("greenhouse", re.compile(r"greenhouse\.io/embed/job_board\?for=([a-zA-Z0-9_-]+)"), fetch_greenhouse),
+    ("lever", re.compile(r"jobs\.lever\.co/([a-zA-Z0-9_-]+)"), fetch_lever),
+    ("ashby", re.compile(r"(?:jobs\.)?ashbyhq\.com/([a-zA-Z0-9_-]+)"), fetch_ashby),
+    ("smartrecruiters", re.compile(r"(?:jobs|careers)\.smartrecruiters\.com/([a-zA-Z0-9_-]+)"), fetch_smartrecruiters),
+    ("smartrecruiters", re.compile(r"api\.smartrecruiters\.com/v1/companies/([a-zA-Z0-9_-]+)"), fetch_smartrecruiters),
+    ("recruitee", re.compile(r"([a-zA-Z0-9_-]+)\.recruitee\.com"), fetch_recruitee),
+]
+
+
+def _detect_ats_jobs(html: str, keywords: list[str], checked: set) -> list[dict]:
+    """Detect an embedded ATS in a careers page's HTML and pull its postings."""
+    jobs: list[dict] = []
+    for name, pat, fn in _ATS_SIGNATURES:
+        m = pat.search(html)
+        if not m:
+            continue
+        slug = m.group(1)
+        if not slug or (name, slug) in checked:
+            continue
+        checked.add((name, slug))
+        jobs += fn(slug, keywords)
+        if len(jobs) >= 20:
+            break
+    return jobs
+
+
+def _iter_jsonld(data):
+    if isinstance(data, list):
+        for x in data:
+            yield from _iter_jsonld(x)
+    elif isinstance(data, dict):
+        if "@graph" in data:
+            for x in data["@graph"]:
+                yield from _iter_jsonld(x)
+        else:
+            yield data
+
+
+def _extract_jsonld_jobs(soup, base_url: str, keywords: list[str], limit: int = 25) -> list[dict]:
+    """Parse schema.org JobPosting data embedded in a page (portal-agnostic)."""
+    import json as _json
+    out = []
+    for tag in soup.find_all("script", type="application/ld+json"):
+        raw = tag.string or tag.get_text() or ""
+        try:
+            data = _json.loads(raw)
+        except Exception:
+            continue
+        for obj in _iter_jsonld(data):
+            if str(obj.get("@type", "")).lower() != "jobposting":
+                continue
+            loc = obj.get("jobLocation") or {}
+            if isinstance(loc, list):
+                loc = loc[0] if loc else {}
+            addr = (loc.get("address") if isinstance(loc, dict) else {}) or {}
+            locstr = ", ".join(x for x in (
+                addr.get("addressLocality"), addr.get("addressRegion"),
+                addr.get("addressCountry") if isinstance(addr.get("addressCountry"), str)
+                else (addr.get("addressCountry") or {}).get("name"),
+            ) if x)
+            out.append({
+                "title": obj.get("title", ""),
+                "location": locstr,
+                "url": obj.get("url") or base_url,
+                "description": re.sub(r"<[^>]+>", " ", obj.get("description", "") or ""),
+                "source": "jsonld",
+            })
+    return _filter_jobs(out, keywords, limit)
+
+
+def _get_soup(url: str, timeout: int = 12):
+    try:
+        resp = requests.get(url, headers=_HEADERS, timeout=timeout, allow_redirects=True)
+        if resp.status_code != 200:
+            return None
+        return BeautifulSoup(resp.text, "lxml")
+    except Exception:
+        return None
+
+
 def _filter_jobs(jobs: list[dict], keywords: list[str], limit: int) -> list[dict]:
     out, seen = [], set()
     for j in jobs:
@@ -480,53 +638,106 @@ def _filter_jobs(jobs: list[dict], keywords: list[str], limit: int) -> list[dict
     return out
 
 
-def resolve_career_jobs(company: str, keywords: list[str]) -> list[dict]:
-    """Find and scrape a company's open roles filtered by keywords."""
-    results = search_text(f"{company} careers jobs", max_results=8)
+def resolve_career_jobs(company: str, keywords: list[str]) -> dict:
+    """Find and scrape a company's open roles from ITS OWN sources only.
+
+    Returns {"jobs": [...], "careers_url": "..."}. Strategy:
+      1. Known ATS links in search results (Greenhouse/Lever/Ashby/SmartRecruiters/Recruitee).
+      2. Otherwise the company's own careers page (verified to belong to it, not an
+         aggregator) and: (a) auto-detect an embedded ATS, (b) JSON-LD JobPosting,
+         (c) same-domain job-link harvest.
+    Aggregator/job-board results (that don't belong to the company) are rejected.
+    """
+    results = (search_text(f"{company} careers", max_results=8)
+               + search_text(f"{company} jobs {' '.join(keywords[:2])}", max_results=4))
     jobs: list[dict] = []
-    checked_ats: set[str] = set()
+    checked: set = set()
+    career_pages: list[str] = []
+    seen_urls: set[str] = set()
+
+    # Registry page takes priority and is trusted as the company's own.
+    careers_url = ANCHOR_CAREERS.get(_norm_name(company), "")
+    if careers_url:
+        career_pages.append(careers_url)
+
+    _ATS_HOSTS = ("greenhouse.io", "lever.co", "ashbyhq.com",
+                  "smartrecruiters.com", "recruitee.com")
 
     for r in results:
         url = (r.get("href") or r.get("url") or "").strip()
-        if not url:
+        if not url or url in seen_urls:
             continue
+        seen_urls.add(url)
         host = urlparse(url).netloc.lower()
 
+        matched, slug, fn = False, "", None
         if "greenhouse.io" in host:
-            slug = _greenhouse_slug(url)
-            if slug and slug not in checked_ats:
-                checked_ats.add(slug)
-                jobs += fetch_greenhouse(slug, keywords)
+            matched, slug, fn = True, _greenhouse_slug(url), fetch_greenhouse
         elif "lever.co" in host:
-            slug = _first_path_seg(url)
-            if slug and slug not in checked_ats:
-                checked_ats.add(slug)
-                jobs += fetch_lever(slug, keywords)
+            matched, slug, fn = True, _first_path_seg(url), fetch_lever
         elif "ashbyhq.com" in host:
-            slug = _first_path_seg(url)
-            if slug and slug not in checked_ats:
-                checked_ats.add(slug)
-                jobs += fetch_ashby(slug, keywords)
+            matched, slug, fn = True, _first_path_seg(url), fetch_ashby
+        elif "smartrecruiters.com" in host:
+            matched, slug, fn = True, _first_path_seg(url), fetch_smartrecruiters
+        elif "recruitee.com" in host:
+            matched, slug, fn = True, host.split(".")[0], fetch_recruitee
+
+        if matched:
+            if slug and (fn, slug) not in checked:
+                checked.add((fn, slug))
+                jobs += fn(slug, keywords)
+        elif re.search(r"career|jobs|join|hiring|vacan|work-with|work-at", url.lower()):
+            # Only trust pages that plausibly belong to the company (skip aggregators).
+            if _host_matches_company(host, company):
+                if not careers_url:
+                    careers_url = url
+                career_pages.append(url)
 
         if len(jobs) >= 15:
             break
 
-    # Generic careers-page fallback when no ATS matched
-    if not jobs:
-        for r in results[:3]:
-            url = (r.get("href") or r.get("url") or "").strip()
-            if url and re.search(r"career|jobs|join|vacan", url.lower()):
-                jobs += _scrape_generic_careers(url, keywords)
-                if jobs:
-                    break
+    # Open the company's own careers page(s) and dig for an embedded ATS / JSON-LD.
+    if len(jobs) < 3:
+        for url in career_pages[:4]:
+            jobs += _scrape_careers_page(url, keywords, checked)
+            if len(jobs) >= 8:
+                break
+
+    if not careers_url and career_pages:
+        careers_url = career_pages[0]
 
     # Dedup by url
     out, seen = [], set()
     for j in jobs:
-        if j["url"] not in seen:
+        if j.get("url") and j["url"] not in seen:
             seen.add(j["url"])
             out.append(j)
-    return out[:15]
+    return {"jobs": out[:20], "careers_url": careers_url}
+
+
+def _scrape_careers_page(url: str, keywords: list[str], checked: set) -> list[dict]:
+    """Extract jobs from a company's own careers page via ATS detection, JSON-LD, then
+    same-domain link harvest. Only returns jobs hosted on the careers page's domain
+    (or a detected ATS) so unrelated links on the page aren't misattributed."""
+    soup = _get_soup(url)
+    if soup is None:
+        return []
+    html = str(soup)
+    jobs = _detect_ats_jobs(html, keywords, checked)
+    if jobs:
+        return jobs
+    jobs = _extract_jsonld_jobs(soup, url, keywords)
+    if not jobs:
+        jobs = _scrape_generic_careers(soup, url, keywords)
+    # Keep only jobs on the same registrable domain as the careers page.
+    base = _reg_domain(urlparse(url).netloc)
+    return [j for j in jobs if _reg_domain(urlparse(j.get("url", "")).netloc) == base]
+
+
+def _reg_domain(host: str) -> str:
+    """Best-effort registrable domain (last two labels) for same-site comparison."""
+    parts = (host or "").lower().split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else (host or "").lower()
 
 
 def _greenhouse_slug(url: str) -> str:
@@ -537,13 +748,14 @@ def _greenhouse_slug(url: str) -> str:
     return segs[0] if segs else ""
 
 
-def _scrape_generic_careers(url: str, keywords: list[str], limit: int = 10) -> list[dict]:
-    page = fetch_page(url)
-    if not page:
-        return []
+def _scrape_generic_careers(soup, url: str, keywords: list[str], limit: int = 10) -> list[dict]:
+    """Last resort: harvest job-detail links from a careers page, using the link
+    text as the title so keyword/location filtering still works."""
     out, seen = [], set()
     base_host = urlparse(url).netloc.lower()
-    for link in page.get("links", []):
+    page_text = soup.get_text(" ", strip=True)[:400]
+    for a in soup.find_all("a", href=True):
+        link = urljoin(url, (a.get("href") or "").strip())
         if urlparse(link).netloc.lower() != base_host:
             continue
         if not re.search(r"/job|/career|/position|/vacan|/opening|/roles?/", link.lower()):
@@ -551,11 +763,12 @@ def _scrape_generic_careers(url: str, keywords: list[str], limit: int = 10) -> l
         if link in seen:
             continue
         seen.add(link)
-        out.append({"title": "", "location": "", "url": link,
-                    "description": page.get("text", "")[:400], "source": "careers-page"})
+        title = a.get_text(" ", strip=True)
+        out.append({"title": title or "", "location": "", "url": link,
+                    "description": title or page_text, "source": "careers-page"})
         if len(out) >= limit:
             break
-    return out
+    return _filter_jobs(out, keywords, limit) if any(k for k in keywords) else out[:limit]
 
 
 # --- Crawler ------------------------------------------------------------
@@ -794,11 +1007,18 @@ class GraphCrawler:
     def _process_company(self, company, company_node_id):
         time.sleep(self.DELAY)
         try:
-            jobs = resolve_career_jobs(company, self.keywords)
+            resolved = resolve_career_jobs(company, self.keywords)
         except Exception as e:
             logger.debug("career resolution failed for %s: %s", company, e)
             return
+        jobs = resolved.get("jobs", [])
+        careers_url = resolved.get("careers_url", "")
+        # Surface a direct careers link even when we can't enumerate jobs (JS portals).
+        if careers_url:
+            gs.update_node_meta(company_node_id, {"careers_url": careers_url})
         if not jobs:
+            if careers_url:
+                self._log(f"  {company}: careers page found (no machine-readable roles) → {careers_url}")
             return
 
         added = 0

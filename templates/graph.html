@@ -251,6 +251,8 @@ function renderCompanies(companies) {
     document.getElementById('companies-tbody').innerHTML = companies.map((c, i) => {
         const meta = c.meta || {};
         const loc = meta.location || '';
+        const careers = meta.careers_url
+            ? ` · <a href="${esc(meta.careers_url)}" target="_blank">careers ↗</a>` : '';
         const badge = meta.in_region ? ' <span class="remote-badge" style="background:#dcfce7;color:#16a34a;">in&nbsp;region</span>' : '';
         const ev = c.evidence || [];
         const hasDetail = (meta.summary || ev.length);
@@ -269,7 +271,7 @@ function renderCompanies(companies) {
         const caret = hasDetail ? `<span style="cursor:pointer;opacity:0.5;" onclick="toggleCo(${i})">▸</span> ` : '';
         return `<tr>
             <td>${caret}${c.url ? `<a href="${c.url}" target="_blank">${esc(c.name)}</a>` : esc(c.name)}${badge}
-                ${loc ? `<div style="opacity:0.5;font-size:0.72rem;">${esc(loc)}</div>` : ''}</td>
+                <div style="opacity:0.55;font-size:0.72rem;">${esc(loc)}${careers}</div></td>
             <td style="text-align:right;">${c.job_count} role${c.job_count === 1 ? '' : 's'}</td></tr>${detail}`;
     }).join('') || '<tr><td>No companies yet…</td></tr>';
 }
